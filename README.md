@@ -119,7 +119,16 @@ Requires Rust with the `x86_64-pc-windows-gnullvm` target and `clang`/`lld`:
 cargo build --release --target x86_64-pc-windows-gnullvm -p victory
 ```
 
-### 2. Recommended Launch Profiles
+### 2. GUI Launcher (Recommended)
+Run the built-in GTK4 launcher (requires system Python 3 + PyGObject/GTK4, preinstalled on Fedora/GNOME):
+
+```bash
+./scripts/protonida-launcher.py
+```
+
+Provides main controls for **Resolution** (720p / 1080p / 1440p / 4K), **Console Profile** (Series S Lockhart vs Series X Anaconda), **Ray Tracing (RTX)** (auto-syncing `VICTORY_BVH_BUILDER` and `settings.xml`), **MangoHud**, and a collapsible **Advanced** drawer for all `VICTORY_*`, Wine, VRAM, guard, and skip-pipeline settings (saved to `~/.config/protonida/launcher.json`).
+
+### 3. CLI Launch Profiles
 
 #### Series S Hardware RTX (Default — 17.2–27.0 FPS, native RTGI & reflections)
 ```bash
