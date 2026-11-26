@@ -22,8 +22,14 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_VICTORY_EXE = REPO_ROOT / "target" / "x86_64-pc-windows-gnullvm" / "release" / "victory.exe"
 DEFAULT_WINESERVER = Path.home() / ".local" / "share" / "xcl-linux" / "wineserver-runtime" / "server" / "wineserver"
 DEFAULT_WINEPREFIX = Path.home() / ".local" / "share" / "xcl-linux" / "prefix"
+DEFAULT_XCL_LINUX_HOME = Path.home() / ".local" / "share" / "xcl-linux"
 DEFAULT_GAME_EXE = Path("/mnt/NVMe/GTAXBOX/GTA6.Xbox.v1.0.2.1-CYBERLEEK/game_scarlett_master.exe")
 DEFAULT_SKIP_PIPELINES = "7115e46a79c78f98,59b1ba494f18c894,b8ca32a6899b87fb,659fe9cae59dbd88"
+
+LOG_LEVELS = [
+    ("warn", "warn (Recommended — lowest CPU overhead)"),
+    ("info", "info (FPS & frame-time telemetry)"),
+]
 
 RESOLUTIONS = [
     ("1280x720", "1280x720 (720p — Recommended 6 GB)"),
@@ -54,8 +60,12 @@ def default_config() -> dict:
         "resolution": "1280x720",
         "console": "series-s",
         "rtx_mode": "rtx_low",
+        "log_level": "warn",
         "mangohud": False,
         # Advanced
+        "xcl_linux_home": str(DEFAULT_XCL_LINUX_HOME),
+        "gpu_filter": "NVIDIA",
+        "cache_dir": "",
         "upscaler": "6",
         "port_constants": True,
         "port_descriptors": True,
@@ -67,8 +77,8 @@ def default_config() -> dict:
         "late_wait_lists": "1024",
         "merge_runs": "8192",
         "async_submit": True,
-        "guard_rest": "250000",
-        "guard_hot": "30000",
+        "guard_rest": "50000",
+        "guard_hot": "1000",
         "texture_budget_mb": "768",
         "card_room_for_targets_mb": "2304",
         "card_buffers_min_kb": "64",
@@ -208,6 +218,11 @@ class ProtonidaWindow(Gtk.ApplicationWindow):
         if shutil.which("mangohud") is None:
             self.mangohud_check.set_tooltip_text("mangohud not found in PATH")
         self._add_row(main_grid, row, "Overlay", self.mangohud_check)
+        row += 1
+
+        # Log level
+        self.log_combo = Gtk.DropDown.new_from_strings([label for _, label in LOG_LEVELS])
+        self._add_row(main_grid, row, "Log Level", self.log_combo)
 
         # Collapsible Advanced Section
         expander = Gtk.Expander(label="Advanced (VICTORY_* / Wine / VRAM / Guards)")
@@ -242,8 +257,8 @@ class ProtonidaWindow(Gtk.ApplicationWindow):
             ("late_wait", "VICTORY_LATE_WAIT", "3"),
             ("late_wait_lists", "VICTORY_LATE_WAIT_LISTS", "1024"),
             ("merge_runs", "VICTORY_MERGE_RUNS", "8192"),
-            ("guard_rest", "VICTORY_GUARD_REST (µs)", "250000"),
-            ("guard_hot", "VICTORY_GUARD_HOT (ms)", "30000"),
+            ("guard_rest", "VICTORY_GUARD_REST (µs)", "50000"),
+            ("guard_hot", "VICTORY_GUARD_HOT (ms)", "1000"),
             ("port_descriptors_every", "PORT_DESCRIPTORS_EVERY", "32"),
             ("port_descriptors_check", "PORT_DESCRIPTORS_CHECK", "2"),
             ("texture_budget_mb", "TEXTURE_BUDGET_MB", "768"),
@@ -260,6 +275,9 @@ class ProtonidaWindow(Gtk.ApplicationWindow):
             ("wine_bin", "Wine Binary", "/usr/bin/wine"),
             ("wineprefix", "WINEPREFIX", str(DEFAULT_WINEPREFIX)),
             ("wineserver", "Custom WINESERVER", str(DEFAULT_WINESERVER)),
+            ("xcl_linux_home", "XCL_LINUX_HOME (llvm-mingw/dxc/cache)", str(DEFAULT_XCL_LINUX_HOME)),
+            ("gpu_filter", "GPU Filter (NVIDIA / AMD / Intel)", "NVIDIA"),
+            ("cache_dir", "VICTORY_CACHE_DIR (optional)", ""),
         ]
         for key, label, placeholder in adv_fields:
             entry = Gtk.Entry()
@@ -336,6 +354,9 @@ class ProtonidaWindow(Gtk.ApplicationWindow):
         rtx_ids = [m[0] for m in RTX_MODES]
         self.rtx_combo.set_selected(rtx_ids.index(cfg["rtx_mode"]) if cfg.get("rtx_mode") in rtx_ids else 0)
 
+        log_ids = [l[0] for l in LOG_LEVELS]
+        self.log_combo.set_selected(log_ids.index(cfg["log_level"]) if cfg.get("log_level") in log_ids else 0)
+
         self.mangohud_check.set_active(bool(cfg.get("mangohud", False)))
         self.port1_chk.set_active(bool(cfg.get("port_constants", True)))
         self.port2_chk.set_active(bool(cfg.get("port_descriptors", True)))
@@ -355,6 +376,7 @@ class ProtonidaWindow(Gtk.ApplicationWindow):
             "resolution": RESOLUTIONS[self.res_combo.get_selected()][0],
             "console": CONSOLES[self.console_combo.get_selected()][0],
             "rtx_mode": RTX_MODES[self.rtx_combo.get_selected()][0],
+            "log_level": LOG_LEVELS[self.log_combo.get_selected()][0],
             "mangohud": self.mangohud_check.get_active(),
             "port_constants": self.port1_chk.get_active(),
             "port_descriptors": self.port2_chk.get_active(),
@@ -415,9 +437,42 @@ class ProtonidaWindow(Gtk.ApplicationWindow):
         update_settings_xml(self.cfg["wineprefix"], self.cfg["rtx_mode"])
 
         env = os.environ.copy()
+        xcl_home = Path(self.cfg.get("xcl_linux_home") or DEFAULT_XCL_LINUX_HOME)
+        env["XCL_LINUX_HOME"] = str(xcl_home)
+        env["WINEARCH"] = "win64"
+        env["WINEDEBUG"] = env.get("WINEDEBUG", "-all")
         env["WINEPREFIX"] = self.cfg["wineprefix"]
         env["WINEDLLOVERRIDES"] = "d3d12,d3d12core,d3d11,dxgi,d3dcompiler_47=n;mscoree,mshtml="
         env["__GL_SHADER_DISK_CACHE_SIZE"] = "4294967296"
+
+        # Prepend llvm-mingw runtime DLLs (libunwind.dll / libc++.dll) to WINEPATH
+        mingw_bin = xcl_home / "llvm-mingw" / "x86_64-w64-mingw32" / "bin"
+        if mingw_bin.exists():
+            mingw_wine = linux_to_wine_path(str(mingw_bin))
+            existing_wp = env.get("WINEPATH", "")
+            env["WINEPATH"] = f"{mingw_wine};{existing_wp}" if existing_wp else mingw_wine
+
+        dxc_bin = xcl_home / "dxc" / "bin" / "x64"
+        if dxc_bin.exists():
+            env["XCL_DXC_DIR"] = linux_to_wine_path(str(dxc_bin))
+
+        vkd3d_cache = xcl_home / "vkd3d-cache"
+        vkd3d_cache.mkdir(parents=True, exist_ok=True)
+        env.setdefault("VKD3D_SHADER_CACHE_PATH", str(vkd3d_cache))
+        env.setdefault("DXVK_STATE_CACHE_PATH", str(vkd3d_cache))
+
+        env.setdefault("XCL_SAFE_BARRIER", "0")
+        gpu_filter = self.cfg.get("gpu_filter", "NVIDIA").strip()
+        if gpu_filter:
+            env["VKD3D_FILTER_DEVICE_NAME"] = gpu_filter
+            env["DXVK_FILTER_DEVICE_NAME"] = gpu_filter
+            if gpu_filter.upper() == "NVIDIA":
+                env["__NV_PRIME_RENDER_OFFLOAD"] = "1"
+                env["__VK_LAYER_NV_optimus"] = "NVIDIA_only"
+
+        if self.cfg.get("cache_dir"):
+            env["VICTORY_CACHE_DIR"] = linux_to_wine_path(self.cfg["cache_dir"])
+        env["VICTORY_LOG"] = self.cfg.get("log_level", "warn")
 
         wineserver = self.cfg.get("wineserver", "")
         if wineserver and Path(wineserver).exists():
@@ -458,13 +513,12 @@ class ProtonidaWindow(Gtk.ApplicationWindow):
         env["VICTORY_WIDE_BACK"] = "1"
         env["VICTORY_CARD_REHASH_RUNS"] = "1"
         env["VICTORY_JOIN_COPIES"] = "1"
-        env["VICTORY_INDIRECT_WINDOW"] = "1"
+        env["VICTORY_INDIRECT_WINDOW"] = "0"
         env["VICTORY_INDIRECT_BATCH"] = "2"
         env["VICTORY_CARD_STEPS"] = "2"
         env["VICTORY_MAP_THREADS"] = "1"
         env["VICTORY_CARD_AWAKE"] = "1"
-        env["VICTORY_SHOW_AFTER"] = "1"
-        env["VICTORY_BACK_OWN_VIEW"] = "1"
+        env["VICTORY_SHOW_AFTER"] = "0"
         env["VICTORY_LAND_SKIP"] = "1"
         env["VICTORY_GUARD_REST"] = self.cfg["guard_rest"]
         env["VICTORY_GUARD_HOT"] = self.cfg["guard_hot"]

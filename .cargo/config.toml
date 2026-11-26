@@ -7,4 +7,4 @@ xtask = "run --quiet --package xtask --"
 rustflags = ["-C", "target-cpu=x86-64-v3"]
 
 [target.x86_64-pc-windows-gnullvm]
-rustflags = ["-C", "target-cpu=x86-64-v3"]
+rustflags = ["-C", "target-cpu=x86-64-v3", "-C", "target-feature=+crt-static"]

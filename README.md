@@ -84,9 +84,9 @@
 
 ### Linux & Wine Engineering
 - **Wine-native memory & write-watch tracking (`watch.rs`, `xmem.rs`)**: Tracks placeholder/watched reservations in-process to eliminate refused `GetWriteWatch` calls (`293 → 0`) and `VirtualQuery` hole scans (`6,705 → 14`).
-- **Wine hot-guard tuning (`VICTORY_GUARD_HOT=30000`, cap raised to 60 s)**: Cuts `wineserver` `VirtualProtect` IPC faults and guard refreshes in half.
+- **Wine hot-guard tuning (`VICTORY_GUARD_HOT=1000`, `VICTORY_GUARD_REST=50000`, `MANY = 65,536`)**: Cuts `wineserver` `VirtualProtect` IPC faults and guard refreshes without introducing stale-frame artifacts.
 - **16 MB pipeline worker stacks**: Prevents silent Wine 2 MB default thread stack overflows during shader translation.
-- **AVX2 / `x86-64-v3` + Thin LTO (`codegen-units = 1`)**: Maximizes CPU throughput across hot copy, hash, and descriptor loops.
+- **Portable static `libunwind` (`+crt-static`) + AVX2 (`x86-64-v3`) + Thin LTO (`codegen-units = 1`)**: Zero `llvm-mingw` runtime DLL dependencies (`libunwind.dll` eliminated) and maximum CPU throughput across hot copy, hash, and descriptor loops.
 
 ### NVIDIA 6 GB & Renderer Optimizations
 - **Renderer Ports 1, 2, 6, and 7** (via `avatarmanz/VIctory-7900XTX`):
@@ -95,9 +95,8 @@
   - **Port 6 (`VICTORY_PORT_GUARD=1`)**: Shared `RwLock` write guards with per-block claims and parallel refresh planning.
   - **Port 7 (`VICTORY_PORT_JOURNAL=1`)**: 64-way sharded journal locks + submit-time heap sync.
 - **NVIDIA 1M-heap `CreateCommittedResource` storm fix**: Eliminated 19,761 unnecessary per-view buffer allocations (`OWN_MADE: 19,761 → 2`, saving ~230 ms/frame).
-- **4× lighter per-frame buffer sweep (`HEAP_ROUND = 64`)** + `BufferSweep` span cache & parallel texture readbacks (`XaviFortes/VIctory-RDNA`).
-- **Cross-stage CBV descriptor table sharing (`VICTORY_TABLE_STAGES`, default ON)** — eliminates duplicate dynamic descriptor allocations & CBV copies when VS/MS and PS read the same root table (`fxceless` `5d659e0`).
-- **Wine hot-block table expansion (`MANY = 65,536`)** — prevents hot-guard table wipes under long `VICTORY_GUARD_HOT` windows (`30 s`).
+- **`BufferSweep` span cache & parallel texture readbacks** (`XaviFortes/VIctory-RDNA`) + safe `VICTORY_INDIRECT_WINDOW=0` (`Itsbatt 340a8f8`).
+- **Wine hot-block table expansion (`MANY = 65,536`)** — prevents hot-guard table wipes during streaming.
 - **NVIDIA dynamic descriptor word-search & early slot release** (`avatarmanz` PR #237).
 - **Optional RT pass skipping (`VICTORY_SKIP_RT=1`)**: Skips 15 unused ray-tracing compute passes and their VRAM allocations when running in non-RT mode.
 
@@ -141,7 +140,8 @@ export VICTORY_PORT_CONSTANTS=1 VICTORY_PORT_DESCRIPTORS=1 VICTORY_PORT_GUARD=1 
 export VICTORY_PORT_DESCRIPTORS_EVERY=32 VICTORY_PORT_DESCRIPTORS_CHECK=2
 export VICTORY_LATE_WAIT=3 VICTORY_LATE_WAIT_LISTS=1024 VICTORY_MERGE_RUNS=8192 VICTORY_ASYNC_SUBMIT=1
 export VICTORY_INPLACE=1 VICTORY_INPLACE_MB=4096
-export VICTORY_GUARD_REST=250000 VICTORY_GUARD_HOT=30000
+export VICTORY_GUARD_REST=50000 VICTORY_GUARD_HOT=1000
+export VICTORY_INDIRECT_WINDOW=0 VICTORY_SHOW_AFTER=0
 export VICTORY_TEXTURE_BUDGET_MB=768 VICTORY_CARD_ROOM_FOR_TARGETS_MB=2304
 export VICTORY_CARD_BUFFERS_MIN_KB=64 VICTORY_CARD_BUFFERS_MB=1024
 export VICTORY_PIPELINE_WORKERS=2 VICTORY_PIPELINE_WAIT_MS=0

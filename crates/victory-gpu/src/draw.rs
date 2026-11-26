@@ -580,7 +580,7 @@ pub(crate) static HEAP_BUFFER_MICROS: AtomicU64 = AtomicU64::new(0);
 pub(crate) static HEAP_SPLIT: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
 
 /// Passes after which every buffer slot of the heap was looked at again.
-const HEAP_ROUND: u64 = 64;
+const HEAP_ROUND: u64 = 16;
 
 /// Whether the slots looked at again for no write are a part of them at
 /// every pass, each slot at every sixteenth (`VICTORY_HEAP_SPREAD=0`: all of
@@ -619,7 +619,7 @@ pub(crate) struct BufferSweep {
     // frame does not rescan every slot in `ranges`.
     part_spans: [crate::host::ByCopy<(std::sync::Arc<crate::shadow::Shadow>, u64, u64)>; HEAP_ROUND as usize],
     part_views: [u32; HEAP_ROUND as usize],
-    dirty_parts: u64,
+    dirty_parts: u16,
     // Last refresh frame and covered interval for throttled, unwatched copies.
     unwatched: std::collections::HashMap<u64, (u64, u64, u64)>,
 }
@@ -652,7 +652,7 @@ impl BufferSweep {
         let p = part as usize;
         self.part_spans[p].clear();
         self.part_views[p] = 0;
-        self.dirty_parts &= !(1u64 << p);
+        self.dirty_parts &= !(1u16 << p);
     }
 
     fn set(&mut self, slot: u32, range: Option<(std::sync::Arc<crate::shadow::Shadow>, u64, u64)>) {
@@ -663,7 +663,7 @@ impl BufferSweep {
             (Some(_), None) => self.part_views[p] -= 1,
             _ => {}
         }
-        if self.dirty_parts & (1u64 << p) != 0 {
+        if self.dirty_parts & (1u16 << p) != 0 {
             return;
         }
         if let Some((old_shadow, old_from, old_to)) = old {
@@ -683,7 +683,7 @@ impl BufferSweep {
                     return;
                 }
             }
-            self.dirty_parts |= 1u64 << p;
+            self.dirty_parts |= 1u16 << p;
             return;
         }
         if let Some((shadow, from, to)) = range {
@@ -1717,36 +1717,6 @@ impl State {
             self.host_roots[usize::from(compute)] = root;
         }
         // By host object: a title pipeline released and another made at its
-/// Whether the stages of one draw share a table they both need made afresh
-/// (`VICTORY_TABLE_STAGES=0` disables; on by default — adapted from fxceless 5d659e0).
-/// Cuts duplicate dynamic descriptor table allocations & CBV copies across VS/MS + PS.
-fn table_stages() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("VICTORY_TABLE_STAGES").is_none_or(|v| v != "0"))
-}
-
-/// Per root table the stages of `p` read: `(slot, max_slots_with_cbv, max_slots_all)`.
-fn stage_spans(p: &HostPipeline) -> Few<(u8, u32, u32), 16> {
-    let mut spans: Few<(u8, u32, u32), 16> = Few::default();
-    if p.stages.len() < 2 {
-        return spans;
-    }
-    for stage in &p.stages {
-        let t = stage.translated();
-        for group in &t.tables.groups {
-            let n = group.max_dword / 8 + 1;
-            let with = if group.has_cbv { n } else { 0 };
-            if let Some(s) = spans.iter_mut().find(|s| s.0 == group.slot) {
-                s.1 = s.1.max(with);
-                s.2 = s.2.max(n);
-            } else {
-                spans.push((group.slot, with, n));
-            }
-        }
-    }
-    spans
-}
-
         // address is another host pipeline (the list keeps the old one).
         if self.host_pipeline != p.pso.as_raw() as usize {
             // SAFETY: an open list and a live pipeline.
@@ -1755,14 +1725,13 @@ fn stage_spans(p: &HostPipeline) -> Few<(u8, u32, u32), 16> {
             // The title may release the pipeline before it submits the list.
             list.bind_pipeline(&p.name, &p.pso, &p.root);
         }
-        let spans = if table_stages() { stage_spans(p) } else { Few::default() };
         for stage in &p.stages {
             let t = stage.translated();
             STORES.set(t.stores);
             if t.stores && crate::picked::on() && crate::picked::picks(&stage.shader, &t.picks) {
                 crate::picked::runs_in(list);
             }
-            let made = self.tables(list, &t.tables, compute, &spans);
+            let made = self.tables(list, &t.tables, compute);
             STORES.set(true);
             if made.iter().any(|m| m.1 == u32::MAX) {
                 once!("a draw whose descriptor table found no free slots is dropped");
@@ -3544,7 +3513,6 @@ fn stage_spans(p: &HostPipeline) -> Few<(u8, u32, u32), 16> {
         list: &HostList,
         plan: &TablePlan,
         compute: bool,
-        spans: &[(u8, u32, u32)],
     ) -> Few<(u8, u32), 16> {
         let mut fresh = [0u64; 4];
         let selected_slot = |mask: &[u64; 4], slot: u8| mask[usize::from(slot / 64)] & (1u64 << (slot % 64)) != 0;
@@ -3604,15 +3572,6 @@ fn stage_spans(p: &HostPipeline) -> Few<(u8, u32, u32), 16> {
             selected.sort_unstable();
             selected.dedup();
             let n = (group.max_dword / 8).max(selected.last().copied().unwrap_or(0)) + 1;
-            let n = match spans.iter().find(|s| s.0 == slot) {
-                Some(&(_, with_constants, all)) => {
-                    let past = heap
-                        .index(table)
-                        .is_some_and(|at| u64::from(at) + u64::from(all) > u64::from(host.count()));
-                    n.max(if past { all } else { with_constants })
-                }
-                None => n,
-            };
             let last = table.checked_add(u64::from(n - 1) * 32);
             if n > crate::descriptor::host::DYNAMIC
                 || last.and_then(|handle| heap.index(handle)).is_none()
