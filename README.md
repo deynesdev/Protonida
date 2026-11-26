@@ -52,14 +52,31 @@
 
 ### Performance Progression
 
-| Milestone | 3D World (~530–594 draws) | Mid City (~1,250 draws) | Heavy City (~2,550–2,700 draws) | GPU Time |
+| Milestone | 3D World (~526–594 draws) | Mid City (~1,250–1,911 draws) | Heavy City (~2,550–2,700 draws) | GPU Wait / Stall\* |
 | :--- | :---: | :---: | :---: | :---: |
-| Initial Linux + `vkd3d-proton 3.2.0` | ~1.3 FPS | ~1.0 FPS | ~0.8 FPS | 100+ ms |
-| Wine `watch.rs`/`xmem.rs` + RB-tree `wineserver` + 6 GB budget | 3.3–3.6 FPS | — | 1.8–2.2 FPS | ~110 ms |
-| Port 1 + `LATE_WAIT=2` + 720p (`UPSCALER=6`) + impostor skip | 11.7 FPS | — | 4.6–5.2 FPS | ~110 ms |
-| `CARD_BUFFERS_MIN_KB=64` + `BufferSweep` + parallel readbacks | 17.3 FPS | — | 12.1 FPS | 0–17 ms |
-| **Protonida — Series S + Screen-Space SH GI** (`BVH_BUILDER=0`, `SKIP_RT=1`) | **25.7–29.3 FPS** | **25.3 FPS** | **20.4 FPS** | **0.0 ms** |
-| **Protonida — Series S + Hardware RTX** (`BVH_BUILDER=1`, `rtDynamicShadows=false`) | **27.0 FPS** | **20.9 FPS** | **17.2–18.7 FPS** | **0.0–0.4 ms** |
+| Initial Linux + `vkd3d-proton 3.2.0` | ~1.3 FPS (~770 ms) | ~1.0 FPS (~1000 ms) | ~0.8 FPS (~1250 ms) | 100+ ms |
+| Wine `watch.rs`/`xmem.rs` + RB-tree `wineserver` + 6 GB budget | 3.3–3.6 FPS (278–303 ms) | — | 1.8–2.2 FPS (455–555 ms) | ~110 ms |
+| Port 1 + `LATE_WAIT=2` + 720p (`UPSCALER=6`) + impostor skip | 11.7 FPS (85.5 ms) | — | 4.6–5.2 FPS (192–217 ms) | ~110 ms |
+| `CARD_BUFFERS_MIN_KB=64` + `BufferSweep` + parallel readbacks | 17.3 FPS (57.7 ms) | — | 12.1 FPS (82.4 ms) | 0–17 ms |
+| **Protonida — Series S + Screen-Space SH GI** (`BVH_BUILDER=0`, `SKIP_RT=1`) | **25.7–29.3 FPS** (34.2–38.9 ms) | **25.3 FPS** (39.5 ms) | **20.4 FPS** (48.9 ms) | **0.0 ms** |
+| **Protonida — Series S + Hardware RTX** (`BVH_BUILDER=1`, `rtDynamicShadows=false`) | **27.0 FPS** (37.1 ms) | **20.9 FPS** (47.7 ms) | **17.2–18.7 FPS** (53.5–58.1 ms) | **0.0–0.4 ms** |
+
+<sub>\*<b>GPU Wait / Stall</b> is the CPU-side fence wait logged by <code>victory_gpu::host</code> (<code>on the GPU</code>) while waiting for the GPU to finish queued work — not raw GPU execution time. With async submission (<code>VICTORY_LATE_WAIT=3</code> + <code>VICTORY_ASYNC_SUBMIT=1</code>), frames are currently CPU <code>preparing</code>-bound on Wine rather than GPU-stalled.</sub>
+
+---
+
+## Progress, Stability & Known Issues
+
+- **Story & in-game progression tested:** Full boot → menus → opening cinematic & live 3D Vice City night/street scenes (500–2,800+ draws/frame) verified with both **Series S Hardware RTX (`VICTORY_BVH_BUILDER=1`, all 53 BVH builder pipelines active)** and **Screen-Space SH GI (`VICTORY_BVH_BUILDER=0`)**. Extended story mission / free-roam playtesting and an uninterrupted MangoHud video capture are next in line.
+- **Stability:** Stable across repeated automated 90–140 s world/city runs on 6 GB VRAM once shaders are cached (`0` DXGI device removals, `0` VRAM OOMs). Long-session (30+ min) stability testing is still in progress. First-time shader translation + `vkd3d-proton` pipeline compilation takes several minutes and causes temporary hitching until `vkd3d-proton.victory.exe.cache` warms up.
+- **Input & Audio:** GameInput keyboard and XInput controller input work (including scripted `VICTORY_KEYS` in release builds). Audio runs through Wine's standard audio backend.
+- **Wine `wineserver` note:** Benchmarks above use a locally patched RB-tree view-indexed + `/dev/ntsync` `wineserver` to cut `VirtualProtect`/`GetWriteWatch` IPC overhead. On unpatched stock Wine Staging, heavy-city CPU `copies` time is higher (~3–5 ms/frame slower depending on kernel/Wine version).
+- **Known issues & visual trade-offs:**
+  - Heavy 2,500–2,800+ draw city scenes remain CPU `preparing`-bound on Linux/Wine (`copies` ~11–16 ms/frame from `VirtualProtect`/`GetWriteWatch` IPCs + per-draw CBV copies).
+  - NVIDIA's 1,000,000-descriptor shader-visible heap cap prevents Renderer Port #5 (`VICTORY_PORT_CBV=1`) table `raw_twins`, so table CBVs are still copied into dynamic slots per draw (mitigated by `VICTORY_TABLE_STAGES`).
+  - `rtDynamicShadows="false"` + `ssroSampleCount="1"` in `settings.xml` trade dynamic ray-traced shadows for higher FPS while keeping full hardware RTGI and RT reflections.
+  - Distant octahedral billboard impostors render as flat panels and are skipped via `VICTORY_SKIP_PIPELINES` (removing broken flat distant panels at the cost of some distant billboard LODs).
+  - `VICTORY_OUTPUT=1280x720` requires `VICTORY_UPSCALER=6` on Series S to avoid a FidelityFX jitter divide-by-zero.
 
 ---
 
@@ -67,7 +84,7 @@
 
 ### Linux & Wine Engineering
 - **Wine-native memory & write-watch tracking (`watch.rs`, `xmem.rs`)**: Tracks placeholder/watched reservations in-process to eliminate refused `GetWriteWatch` calls (`293 → 0`) and `VirtualQuery` hole scans (`6,705 → 14`).
-- **Wine hot-guard tuning (`VICTORY_GUARD_HOT=15000`, cap raised to 60 s)**: Cuts `wineserver` `VirtualProtect` IPC faults and guard refreshes in half.
+- **Wine hot-guard tuning (`VICTORY_GUARD_HOT=30000`, cap raised to 60 s)**: Cuts `wineserver` `VirtualProtect` IPC faults and guard refreshes in half.
 - **16 MB pipeline worker stacks**: Prevents silent Wine 2 MB default thread stack overflows during shader translation.
 - **AVX2 / `x86-64-v3` + Thin LTO (`codegen-units = 1`)**: Maximizes CPU throughput across hot copy, hash, and descriptor loops.
 
@@ -104,7 +121,7 @@ cargo build --release --target x86_64-pc-windows-gnullvm -p victory
 
 ### 2. Recommended Launch Profiles
 
-#### Series S Hardware RTX (Default — 17–23 FPS, native RTGI & reflections)
+#### Series S Hardware RTX (Default — 17.2–27.0 FPS, native RTGI & reflections)
 ```bash
 export WINEDLLOVERRIDES="d3d12,d3d12core,d3d11,dxgi,d3dcompiler_47=n;mscoree,mshtml="
 export __GL_SHADER_DISK_CACHE_SIZE=4294967296
