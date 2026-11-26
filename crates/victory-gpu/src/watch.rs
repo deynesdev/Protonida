@@ -686,6 +686,12 @@ fn spread_each<T: Send>(n: usize, each: impl Fn(usize) -> T + Sync) -> Vec<T> {
 /// last asked, in order, each once, with their written parts; `None` if the range is not write-watched
 /// memory of one reservation. The caller holds the range ([`Asking`]).
 fn kernel_written(first: usize, last: usize) -> Option<Vec<(usize, u16)>> {
+    let (start, end) = (first * PAGE, last * PAGE);
+    if crate::uffd::is_private_registered(start, end) {
+        if let Some(pages) = crate::uffd::scan_pages_64k(start, end, false) {
+            return Some(pages);
+        }
+    }
     use windows_sys::Win32::System::Memory::GetWriteWatch;
     const WRITE_WATCH_FLAG_RESET: u32 = 1;
     FOUND.with(|found| {
@@ -776,6 +782,7 @@ pub fn note_watched(at: usize, len: usize) {
     if len == 0 {
         return;
     }
+    crate::uffd::register_private(at, len);
     let first = at / PAGE;
     let last = at.saturating_add(len).div_ceil(PAGE);
     let mut v = WATCHED_PAGES.write().unwrap_or_else(|e| e.into_inner());
@@ -799,6 +806,9 @@ fn watched_reservation(first: usize, last: usize) -> Option<(usize, usize)> {
 }
 
 fn unnote_ranges(at: usize, len: usize) {
+    if len != 0 {
+        crate::uffd::unregister(at, len);
+    }
     let p_first = at / PAGE;
     let p_last = if len != 0 { at.saturating_add(len).div_ceil(PAGE) } else { p_first + 1 };
     {
@@ -833,7 +843,8 @@ fn ask_ahead_held(ranges: &[(usize, usize)], held: bool) {
         .iter()
         // Not view memory known by its bits, and only ranges inside a known
         // MEM_WRITE_WATCH reservation (so GetWriteWatch never fails on views
-        // or crosses reservation boundaries).
+        // or crosses reservation boundaries). UFFD views are swept once in
+        // `ask_rest` via `uffd::sweep_all_views()`.
         .filter(|r| r.0 < r.1 && !published(r.0, r.1) && !refused_as_view(r.0, r.1))
         .filter_map(|&(start, end)| {
             let (f, l) = (start / PAGE, end.div_ceil(PAGE));
@@ -1142,11 +1153,15 @@ fn ask_rest(ranges: &[(usize, usize)], held: bool) {
     let mut alone_ranges: Vec<(usize, usize)> = Vec::new();
     let mut held_ahead = Ahead::new();
     held_ahead.set(std::mem::take(&mut ahead));
+    let uffd_views = crate::uffd::views_enabled();
     for &(start, end) in ranges {
         if start >= end || published(start, end) || refused_as_view(start, end) {
             continue;
         }
         let (first, last) = (start / PAGE, end.div_ceil(PAGE));
+        if uffd_views && watched_reservation(first, last).is_none() {
+            continue;
+        }
         if !held_ahead.holds(first, last) && !alone_ranges.iter().any(|&(a, b)| a <= first && last <= b) {
             alone_ranges.push((first, last));
         }
@@ -1165,6 +1180,27 @@ fn ask_rest(ranges: &[(usize, usize)], held: bool) {
         if let Some(pages) = found {
             written.extend(pages);
             ahead.push((first, last));
+        }
+    }
+    // When VICTORY_UFFD_VIEWS=1, sweep all registered UFFD views ONCE per
+    // submission in a handful of coalesced PAGEMAP_SCAN ioctls, propagate ONLY
+    // the dirty pages to their sibling aliases, and add all view intervals to
+    // `ahead` so every subsequent `writes()` / `nothing_new()` hits the journal
+    // with 0 ioctls.
+    if uffd_views {
+        if let Some((covered, view_dirty)) = crate::uffd::sweep_all_views() {
+            ahead.extend(covered);
+            for (page, parts) in view_dirty {
+                written.push((page, parts));
+                if view_guard() {
+                    for other in crate::inplace::pages_of(page * PAGE) {
+                        let other_page = other / PAGE;
+                        if other_page != page {
+                            written.push((other_page, parts));
+                        }
+                    }
+                }
+            }
         }
     }
     note_hot(&written);
@@ -1371,34 +1407,43 @@ pub(crate) fn writes(start: usize, end: usize, guarded: bool) -> Option<(u64, Ve
     let pages = match if refused { None } else { kernel_written(first, last) } {
         Some(pages) => pages,
         None => {
-            guards_asked = true;
-            if !guarded {
-                return None;
-            }
-            #[cfg(feature = "diagnostics")]
-            let guarding = std::time::Instant::now();
-            let mut written = guard(first * PAGE, last * PAGE).map(|pages| pages.into_iter().map(|p| (p, WHOLE)).collect::<Vec<_>>());
-            if written.is_none() && viewed {
-                // Not a view after all (other memory there now): forgotten as
-                // one, and the kernel asked as before.
-                (first..last).for_each(|block| VIEWS.clear(block));
-                if let Some(pages) = kernel_written(first, last) {
-                    guards_asked = false;
-                    written = Some(pages);
+            if guarded && crate::uffd::is_view_registered(first * PAGE, last * PAGE) {
+                if let Some(pages) = uffd_view_written(first, last) {
+                    pages
+                } else {
+                    guards_asked = true;
+                    guard(first * PAGE, last * PAGE).map(|pages| pages.into_iter().map(|p| (p, WHOLE)).collect::<Vec<_>>())?
                 }
-            }
-            #[cfg(feature = "diagnostics")]
-            {
-                use crate::copystat::{C, add};
-                let us = guarding.elapsed().as_micros() as u64;
-                add(C::GuardUs, us);
-                if written.is_some() {
-                    add(C::Watches, 1);
-                    add(C::WatchUs, us);
-                    slow(us);
+            } else {
+                guards_asked = true;
+                if !guarded {
+                    return None;
                 }
+                #[cfg(feature = "diagnostics")]
+                let guarding = std::time::Instant::now();
+                let mut written = guard(first * PAGE, last * PAGE).map(|pages| pages.into_iter().map(|p| (p, WHOLE)).collect::<Vec<_>>());
+                if written.is_none() && viewed {
+                    // Not a view after all (other memory there now): forgotten as
+                    // one, and the kernel asked as before.
+                    (first..last).for_each(|block| VIEWS.clear(block));
+                    if let Some(pages) = kernel_written(first, last) {
+                        guards_asked = false;
+                        written = Some(pages);
+                    }
+                }
+                #[cfg(feature = "diagnostics")]
+                {
+                    use crate::copystat::{C, add};
+                    let us = guarding.elapsed().as_micros() as u64;
+                    add(C::GuardUs, us);
+                    if written.is_some() {
+                        add(C::Watches, 1);
+                        add(C::WatchUs, us);
+                        slow(us);
+                    }
+                }
+                written?
             }
-            written?
         }
     };
     if pages.is_empty() {
@@ -2155,10 +2200,113 @@ fn placeholder(block: usize) -> bool {
     status >= 0 && region.region_type & PLACEHOLDER_RESERVATION != 0
 }
 
+/// Scans UFFD-registered `MEM_MAPPED` view range `[first, last)` (64 KiB pages)
+/// and any aliased views of its physical pages, returning all dirty `(page, parts)`
+/// pairs (including sibling aliases so `JOURNAL` stays consistent across views).
+fn uffd_view_written(first: usize, last: usize) -> Option<Vec<(usize, u16)>> {
+    let (start, end) = (first * PAGE, last * PAGE);
+    let mut dirty = crate::uffd::scan_pages_64k(start, end, true)?;
+    let aliases = elsewhere(start, end - start);
+    if aliases.is_empty() {
+        return Some(dirty);
+    }
+    let mut dirty_map: BTreeMap<usize, u16> = BTreeMap::new();
+    for (p, parts) in dirty.drain(..) {
+        *dirty_map.entry(p).or_insert(0) |= parts;
+    }
+    // Collect unique alias blocks outside [start, end) that are UFFD-registered,
+    // sort them, and coalesce into contiguous runs so we issue a handful of
+    // PAGEMAP_SCAN ioctls instead of one per 64 KiB block.
+    let mut alias_blocks: Vec<usize> = Vec::new();
+    for (_, others) in &aliases {
+        for &other in others {
+            if other < start || other >= end {
+                alias_blocks.push(other);
+            }
+        }
+    }
+    if !alias_blocks.is_empty() {
+        alias_blocks.sort_unstable();
+        alias_blocks.dedup();
+        let mut i = 0;
+        while i < alias_blocks.len() {
+            let run_start = alias_blocks[i];
+            let mut run_end = run_start + BLOCK;
+            let mut k = i + 1;
+            while k < alias_blocks.len() && alias_blocks[k] <= run_end + (4 << 20) && (alias_blocks[k] + BLOCK - run_start) <= (256 << 20) {
+                run_end = alias_blocks[k] + BLOCK;
+                k += 1;
+            }
+            if crate::uffd::is_view_registered(run_start, run_end) {
+                if let Some(other_dirty) = crate::uffd::scan_pages_64k(run_start, run_end, true) {
+                    for (p, parts) in other_dirty {
+                        *dirty_map.entry(p).or_insert(0) |= parts;
+                    }
+                }
+            } else {
+                // Scan only contiguous registered sub-runs.
+                let mut j = i;
+                while j < k {
+                    let s = alias_blocks[j];
+                    if !crate::uffd::is_view_registered(s, s + BLOCK) {
+                        j += 1;
+                        continue;
+                    }
+                    let mut e = s + BLOCK;
+                    let mut m = j + 1;
+                    while m < k && alias_blocks[m] == e && crate::uffd::is_view_registered(alias_blocks[m], alias_blocks[m] + BLOCK) {
+                        e += BLOCK;
+                        m += 1;
+                    }
+                    if let Some(other_dirty) = crate::uffd::scan_pages_64k(s, e, true) {
+                        for (p, parts) in other_dirty {
+                            *dirty_map.entry(p).or_insert(0) |= parts;
+                        }
+                    }
+                    j = m;
+                }
+            }
+            i = k;
+        }
+    }
+    // Propagate any dirty page across all of its sibling views.
+    let mut extra: Vec<(usize, u16)> = Vec::new();
+    for (local_addr, others) in aliases {
+        let local_page = local_addr / PAGE;
+        let mut combined_parts = dirty_map.get(&local_page).copied().unwrap_or(0);
+        for &other in &others {
+            if let Some(&parts) = dirty_map.get(&(other / PAGE)) {
+                combined_parts |= parts;
+            }
+        }
+        if combined_parts != 0 {
+            extra.push((local_page, combined_parts));
+            for other in others {
+                extra.push((other / PAGE, combined_parts));
+            }
+        }
+    }
+    for (p, parts) in extra {
+        *dirty_map.entry(p).or_insert(0) |= parts;
+    }
+    Some(dirty_map.into_iter().collect())
+}
+
 /// The runtime gave the title memory at `[at, at + len)`, allocated or
 /// committed: what was known of holes there is asked again.
 pub fn title_memory_allocated(at: usize, len: usize) {
-    if len == 0 || !known_holes() {
+    if len == 0 {
+        return;
+    }
+    if crate::uffd::enabled() {
+        let end = at.saturating_add(len);
+        if watched_reservation(at / PAGE, end.div_ceil(PAGE)).is_some()
+            && !crate::uffd::is_private_registered(at, end)
+        {
+            crate::uffd::register_private(at, len);
+        }
+    }
+    if !known_holes() {
         return;
     }
     let g = guards();
@@ -3313,6 +3461,7 @@ pub fn writing(at: usize, len: usize) {
         let _ = opened;
     }
     // A placed texture there changes with no descriptor written.
+    note_uffd_view_dirty(at, len);
     crate::descriptor::host::remapped(at, len);
 }
 
@@ -3432,6 +3581,7 @@ pub fn title_memory_written(at: usize, len: usize, pages: bool) {
         }
     }
     // A placed texture there changed with no descriptor written.
+    note_uffd_view_dirty(at, len);
     crate::descriptor::host::page_written(at, len);
 }
 
@@ -3701,9 +3851,43 @@ pub fn title_memory_reading_now() -> Option<Reading> {
 /// next write to it an access violation nobody takes (`on_write` finds it
 /// neither guarded nor writable) and a kernel read into it fail, so the
 /// write access is given back.
+/// Notes `[at, at + len)` (and its aliased views) as dirty in `JOURNAL` when
+/// UFFD view tracking is active, so external writes (DirectStorage, kernel
+/// reads, fresh mappings) that do not touch the title's view PTE are never
+/// missed.
+fn note_uffd_view_dirty(at: usize, len: usize) {
+    if len == 0 || !crate::uffd::views_enabled() {
+        return;
+    }
+    let end = at.saturating_add(len);
+    if !crate::uffd::is_view_registered(at, end) {
+        return;
+    }
+    let first = at / PAGE;
+    let last = end.div_ceil(PAGE);
+    let mut pages: Vec<(usize, u16)> = (first..last).map(|p| (p, WHOLE)).collect();
+    for (_, others) in elsewhere(at, len) {
+        for other in others {
+            pages.push((other / PAGE, WHOLE));
+        }
+    }
+    if port_journal() {
+        let _ = note_shared(&pages);
+    } else {
+        let mut j = journal_mut();
+        let now = next_asking();
+        for (p, parts) in pages {
+            j.notes.note(p, parts, now);
+        }
+    }
+}
+
 pub fn title_memory_remapped(at: usize, len: usize) {
     crate::texback::remapped(at, len);
     open(&mut title_memory_changed(at, len), at, at.saturating_add(len));
+    if len != 0 && crate::uffd::views_enabled() && crate::uffd::register_view(at, len) {
+        note_uffd_view_dirty(at, len);
+    }
 }
 
 /// The runtime is about to unmap title memory `[at, at + len)`: it is
@@ -3712,6 +3896,9 @@ pub fn title_memory_remapped(at: usize, len: usize) {
 /// before the unmapping would leave the address guarded, clean and known by
 /// its bits ([`PUBLISHED`]) with no view behind it.
 pub fn title_memory_unmapping(at: usize, len: usize) {
+    if len != 0 {
+        crate::uffd::unregister(at, len);
+    }
     crate::texback::remapped(at, len);
     forget_views(at / BLOCK, at.saturating_add(len).div_ceil(BLOCK));
     let mut g = title_memory_changed(at, len);

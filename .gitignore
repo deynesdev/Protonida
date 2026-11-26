@@ -80,3 +80,5 @@ Thumbs.db
 # Python bytecode caches (launcher)
 __pycache__/
 *.pyc
+native/*.so
+native/test_uffd_bridge

@@ -1380,7 +1380,12 @@ impl Staging {
         // SAFETY: committed memory of the texture's layout size, and it
         // stays committed while `_mapped` is held.
         let tiled = unsafe { std::slice::from_raw_parts(self.memory, size) };
+        let stats = crate::uffd::stats_enabled();
+        let h0 = stats.then(std::time::Instant::now);
         let hash = digest(tiled);
+        if let Some(t) = h0 {
+            crate::uffd::HASH_NS.fetch_add(t.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+        }
         #[cfg(feature = "diagnostics")]
         crate::copystat::add(crate::copystat::C::TexHashed, size as u64);
         if last.hash == Some(hash) {
@@ -1388,8 +1393,13 @@ impl Staging {
         }
         last.hash = Some(hash);
         found_blind(last);
+        let c0 = stats.then(std::time::Instant::now);
         self.detile(tiled);
         self.keep_whole(tiled);
+        if let Some(t) = c0 {
+            crate::uffd::UPLOAD_COPY_NS.fetch_add(t.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+            crate::uffd::UPLOAD_BYTES.fetch_add(size as u64, std::sync::atomic::Ordering::Relaxed);
+        }
         #[cfg(feature = "diagnostics")]
         crate::copystat::add(crate::copystat::C::TexChanged, size as u64);
         size

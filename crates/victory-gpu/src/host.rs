@@ -9159,6 +9159,8 @@ fn meter_lines(lines: impl FnOnce() + Send + 'static) {
 struct Meter {
     last_present: windows::core::HRESULT,
     since: std::time::Instant,
+    last_frame: std::time::Instant,
+    frame_us: Vec<u32>,
     frames: u32,
     #[cfg(feature = "diagnostics")]
     copy_stats_frames: u64,
@@ -9174,6 +9176,8 @@ impl Meter {
         Meter {
             last_present: windows::Win32::Foundation::S_OK,
             since: now,
+            last_frame: now,
+            frame_us: Vec::with_capacity(256),
             frames: 0,
             #[cfg(feature = "diagnostics")]
             copy_stats_frames: 0,
@@ -9209,6 +9213,12 @@ impl Meter {
         tracing::debug!(target: "victory_gpu::frame", token = crate::frame::current(), "present");
         #[cfg(feature = "diagnostics")]
         crate::copystat::presented();
+        let now = std::time::Instant::now();
+        let dt_us = now.saturating_duration_since(self.last_frame).as_micros().min(u32::MAX as u128) as u32;
+        self.last_frame = now;
+        if self.frame_us.len() < 1024 {
+            self.frame_us.push(dt_us);
+        }
         self.frames += 1;
         #[cfg(feature = "diagnostics")]
         {
@@ -9230,9 +9240,12 @@ impl Meter {
         // 3 ms each second there (run ask-1), and 30 ms each 5 s (lane2-0).
         // Their counters are taken there, a moment after the frames counted.
         let five = self.logged.elapsed() >= std::time::Duration::from_secs(5);
-        if five {
+        let pct_samples = if five {
             self.logged = std::time::Instant::now();
-        }
+            std::mem::take(&mut self.frame_us)
+        } else {
+            Vec::new()
+        };
         #[cfg(feature = "diagnostics")]
         let copy_stats_frames = if five { std::mem::take(&mut self.copy_stats_frames) as f64 } else { 0.0 };
         meter_lines(move || {
@@ -9421,6 +9434,23 @@ impl Meter {
                         per_frame(4) / 1e6,
                         per_frame(5),
                         per_frame(6) / 1e3
+                    );
+                }
+                crate::uffd::stats_line(frames);
+                if !pct_samples.is_empty() {
+                    let mut s = pct_samples;
+                    s.sort_unstable();
+                    let at = |num: usize, den: usize| -> f64 {
+                        let idx = ((s.len() - 1) * num) / den;
+                        f64::from(s[idx]) / 1000.0
+                    };
+                    tracing::info!(
+                        "frametime percentiles (n={}): p50={:.1} ms, p95={:.1} ms, p99={:.1} ms, max={:.1} ms",
+                        s.len(),
+                        at(50, 100),
+                        at(95, 100),
+                        at(99, 100),
+                        f64::from(*s.last().unwrap_or(&0)) / 1000.0
                     );
                 }
                 tracing::info!(

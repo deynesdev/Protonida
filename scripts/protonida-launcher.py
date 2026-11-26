@@ -260,6 +260,13 @@ class ProtonidaWindow(Gtk.ApplicationWindow):
         self._add_row(adv_grid, arow, "Streaming Trade-offs", pop_box)
         arow += 1
 
+        self.uffd_chk = Gtk.CheckButton(label="Linux UFFD WP Async + PAGEMAP_SCAN (experimental)")
+        uffd_so = REPO_ROOT / "native" / "libprotonida_uffd.so"
+        if not uffd_so.exists():
+            self.uffd_chk.set_tooltip_text(f"Build native bridge first: {REPO_ROOT / 'scripts' / 'build-uffd-bridge.sh'}")
+        self._add_row(adv_grid, arow, "Dirty-Memory Tracker", self.uffd_chk)
+        arow += 1
+
         self.adv_entries: dict[str, Gtk.Entry] = {}
         adv_fields = [
             ("upscaler", "VICTORY_UPSCALER", "6"),
@@ -310,6 +317,10 @@ class ProtonidaWindow(Gtk.ApplicationWindow):
         self.launch_btn.add_css_class("suggested-action")
         self.launch_btn.connect("clicked", self._on_launch)
 
+        self.prebake_btn = Gtk.Button(label="Prebake Shaders")
+        self.prebake_btn.set_tooltip_text("Pre-translate console shaders to DXIL and warm vkd3d-proton PSO cache")
+        self.prebake_btn.connect("clicked", self._on_prebake)
+
         self.stop_btn = Gtk.Button(label="Stop")
         self.stop_btn.add_css_class("destructive-action")
         self.stop_btn.set_sensitive(False)
@@ -322,6 +333,7 @@ class ProtonidaWindow(Gtk.ApplicationWindow):
         reset_btn.connect("clicked", self._on_reset)
 
         btn_box.append(self.launch_btn)
+        btn_box.append(self.prebake_btn)
         btn_box.append(self.stop_btn)
         btn_box.append(save_btn)
         btn_box.append(reset_btn)
@@ -332,15 +344,15 @@ class ProtonidaWindow(Gtk.ApplicationWindow):
         self.status_label.set_xalign(0.0)
         root.append(self.status_label)
 
-        log_expander = Gtk.Expander(label="Live Output Log")
+        self.log_expander = Gtk.Expander(label="Live Output Log")
         log_scroll = Gtk.ScrolledWindow()
         log_scroll.set_min_content_height(150)
         self.log_view = Gtk.TextView()
         self.log_view.set_editable(False)
         self.log_view.set_monospace(True)
         log_scroll.set_child(self.log_view)
-        log_expander.set_child(log_scroll)
-        root.append(log_expander)
+        self.log_expander.set_child(log_scroll)
+        root.append(self.log_expander)
 
         self._apply_config_to_ui(self.cfg)
 
@@ -373,6 +385,7 @@ class ProtonidaWindow(Gtk.ApplicationWindow):
         self.async_chk.set_active(bool(cfg.get("async_submit", True)))
         self.show_after_chk.set_active(bool(cfg.get("show_after", False)))
         self.tex_nowait_chk.set_active(bool(cfg.get("texture_no_wait", False)))
+        self.uffd_chk.set_active(bool(cfg.get("uffd_wp", False)))
 
         for key, entry in self.adv_entries.items():
             entry.set_text(str(cfg.get(key, "")))
@@ -395,6 +408,7 @@ class ProtonidaWindow(Gtk.ApplicationWindow):
             "async_submit": self.async_chk.get_active(),
             "show_after": self.show_after_chk.get_active(),
             "texture_no_wait": self.tex_nowait_chk.get_active(),
+            "uffd_wp": self.uffd_chk.get_active(),
             "extra_env": extra_env,
         }
         for key, entry in self.adv_entries.items():
@@ -550,6 +564,14 @@ class ProtonidaWindow(Gtk.ApplicationWindow):
             env["VICTORY_SKIP_RT"] = "0"
             env["VICTORY_AMBIENT"] = "off"
 
+        if self.cfg.get("uffd_wp"):
+            uffd_so = REPO_ROOT / "native" / "libprotonida_uffd.so"
+            if uffd_so.exists():
+                env["VICTORY_UFFD_WP"] = "1"
+                env["VICTORY_UFFD_VIEWS"] = "1"
+                prev = env.get("LD_PRELOAD", "")
+                env["LD_PRELOAD"] = f"{uffd_so}:{prev}" if prev else str(uffd_so)
+
         for raw_line in self.cfg.get("extra_env", "").splitlines():
             line = raw_line.strip()
             if line and not line.startswith("#") and "=" in line:
@@ -574,6 +596,7 @@ class ProtonidaWindow(Gtk.ApplicationWindow):
         self.log_view.get_buffer().set_text(f"$ {shlex.join(cmd)}\n")
         self.status_label.set_text("Running…")
         self.launch_btn.set_sensitive(False)
+        self.prebake_btn.set_sensitive(False)
         self.stop_btn.set_sensitive(True)
 
         def runner() -> None:
@@ -598,6 +621,85 @@ class ProtonidaWindow(Gtk.ApplicationWindow):
 
         threading.Thread(target=runner, daemon=True).start()
 
+    def _on_prebake(self, _btn: Gtk.Button) -> None:
+        if self.proc is not None and self.proc.poll() is None:
+            return
+        self.cfg = self._collect_config_from_ui()
+        save_config(self.cfg)
+
+        game_exe = self.cfg["game_exe"]
+        victory_exe = self.cfg["victory_exe"]
+        wine_bin = self.cfg["wine_bin"]
+        if not game_exe or not Path(game_exe).exists():
+            self.status_label.set_text("Error: Game executable not found.")
+            return
+        if not victory_exe or not Path(victory_exe).exists():
+            self.status_label.set_text(f"Error: victory.exe not found at {victory_exe}")
+            return
+
+        env = os.environ.copy()
+        xcl_home = Path(self.cfg.get("xcl_linux_home") or DEFAULT_XCL_LINUX_HOME)
+        env["XCL_LINUX_HOME"] = str(xcl_home)
+        env["WINEARCH"] = "win64"
+        env["WINEDEBUG"] = env.get("WINEDEBUG", "-all")
+        env["WINEPREFIX"] = self.cfg["wineprefix"]
+        env["WINEDLLOVERRIDES"] = "d3d12,d3d12core,d3d11,dxgi,d3dcompiler_47=n;mscoree,mshtml="
+        env["__GL_SHADER_DISK_CACHE_SIZE"] = "4294967296"
+        dxc_bin = xcl_home / "dxc" / "bin" / "x64"
+        if dxc_bin.exists():
+            env["XCL_DXC_DIR"] = linux_to_wine_path(str(dxc_bin))
+        vkd3d_cache = xcl_home / "vkd3d-cache"
+        vkd3d_cache.mkdir(parents=True, exist_ok=True)
+        env.setdefault("VKD3D_SHADER_CACHE_PATH", str(vkd3d_cache))
+        gpu_filter = self.cfg.get("gpu_filter", "NVIDIA").strip()
+        if gpu_filter:
+            env["VKD3D_FILTER_DEVICE_NAME"] = gpu_filter
+            if gpu_filter.upper() == "NVIDIA":
+                env["__NV_PRIME_RENDER_OFFLOAD"] = "1"
+                env["__VK_LAYER_NV_optimus"] = "NVIDIA_only"
+        if self.cfg.get("cache_dir"):
+            env["VICTORY_CACHE_DIR"] = linux_to_wine_path(self.cfg["cache_dir"])
+
+        game_dir_wine = linux_to_wine_path(str(Path(game_exe).parent))
+        steps = [
+            ("Precompiling console shaders → DXIL", [wine_bin, victory_exe, "shaders", game_dir_wine]),
+            ("Warming host D3D12 / vkd3d-proton PSO cache", [wine_bin, victory_exe, "warm"]),
+        ]
+
+        self.log_expander.set_expanded(True)
+        self.log_view.get_buffer().set_text("=== Protonida Shader Prebake ===\n")
+        self.status_label.set_text("Prebaking shaders…")
+        self.launch_btn.set_sensitive(False)
+        self.prebake_btn.set_sensitive(False)
+        self.stop_btn.set_sensitive(True)
+
+        def runner() -> None:
+            last_code = 0
+            try:
+                for label, cmd in steps:
+                    GLib.idle_add(self._append_log, f"\n--- {label} ---\n$ {shlex.join(cmd)}\n")
+                    self.proc = subprocess.Popen(
+                        cmd,
+                        cwd=str(REPO_ROOT),
+                        env=env,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                        errors="replace",
+                    )
+                    assert self.proc.stdout is not None
+                    for line in self.proc.stdout:
+                        GLib.idle_add(self._append_log, line)
+                    last_code = self.proc.wait()
+                    if last_code != 0:
+                        break
+                GLib.idle_add(self._on_finished, last_code)
+            except Exception as exc:
+                GLib.idle_add(self._append_log, f"\nPrebake error: {exc}\n")
+                GLib.idle_add(self._on_finished, -1)
+
+        threading.Thread(target=runner, daemon=True).start()
+
     def _on_stop(self, _btn: Gtk.Button) -> None:
         if self.proc is not None and self.proc.poll() is None:
             self.proc.terminate()
@@ -606,6 +708,7 @@ class ProtonidaWindow(Gtk.ApplicationWindow):
     def _on_finished(self, code: int) -> bool:
         self.proc = None
         self.launch_btn.set_sensitive(True)
+        self.prebake_btn.set_sensitive(True)
         self.stop_btn.set_sensitive(False)
         self.status_label.set_text(f"Exited with code {code}.")
         return False
