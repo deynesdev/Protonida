@@ -1347,9 +1347,8 @@ fn view_elements(view: &View) -> Option<(u32, bool, u32)> {
 /// an untyped structured view also needs that copy to be 16-byte aligned.
 /// A typed view of 12-byte elements also needs its own copy when its start
 /// is a multiple of 16 but not a multiple of 12.
-fn off_elements(offset: u64, stride: u32, raw: bool, element: u64, has_raw_twins: bool) -> bool {
-    let needs_raw = stride > 0 && stride.is_multiple_of(4) && !has_raw_twins;
-    if raw || needs_raw {
+fn off_elements(offset: u64, stride: u32, raw: bool, element: u64, _has_raw_twins: bool) -> bool {
+    if raw {
         !offset.is_multiple_of(16)
     } else if stride > 0 {
         !offset.is_multiple_of(16) && !offset.is_multiple_of(u64::from(stride))
