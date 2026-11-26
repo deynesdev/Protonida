@@ -76,3 +76,7 @@
 *.swp
 Thumbs.db
 .DS_Store
+
+# Python bytecode caches (launcher)
+__pycache__/
+*.pyc

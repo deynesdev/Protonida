@@ -75,7 +75,6 @@ def default_config() -> dict:
         "port_descriptors_check": "2",
         "late_wait": "3",
         "late_wait_lists": "1024",
-        "merge_runs": "8192",
         "async_submit": True,
         "show_after": False,
         "texture_no_wait": False,
@@ -266,7 +265,6 @@ class ProtonidaWindow(Gtk.ApplicationWindow):
             ("upscaler", "VICTORY_UPSCALER", "6"),
             ("late_wait", "VICTORY_LATE_WAIT", "3"),
             ("late_wait_lists", "VICTORY_LATE_WAIT_LISTS", "1024"),
-            ("merge_runs", "VICTORY_MERGE_RUNS", "8192"),
             ("guard_rest", "VICTORY_GUARD_REST (µs)", "50000"),
             ("guard_hot", "VICTORY_GUARD_HOT (ms)", "1000"),
             ("port_descriptors_every", "PORT_DESCRIPTORS_EVERY", "32"),
@@ -510,7 +508,6 @@ class ProtonidaWindow(Gtk.ApplicationWindow):
         env["VICTORY_PORT_JOURNAL"] = "1" if self.cfg["port_journal"] else "0"
         env["VICTORY_LATE_WAIT"] = self.cfg["late_wait"]
         env["VICTORY_LATE_WAIT_LISTS"] = self.cfg["late_wait_lists"]
-        env["VICTORY_MERGE_RUNS"] = self.cfg["merge_runs"]
         env["VICTORY_ASYNC_SUBMIT"] = "1" if self.cfg["async_submit"] else "0"
         env["VICTORY_INPLACE"] = "1"
         env["VICTORY_INPLACE_MB"] = self.cfg["inplace_mb"]
