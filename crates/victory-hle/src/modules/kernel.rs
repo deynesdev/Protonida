@@ -434,6 +434,24 @@ pub extern "system" fn SetThreadPriority(thread: *mut c_void, priority: i32) -> 
     unsafe { windows_sys::Win32::System::Threading::SetThreadPriority(thread, priority) }
 }
 
+/// Adjusted performance counter: stays monotonic and pauses during GPU preload
+/// gates (`LoverCatys b3073ea`) so intro/cutscene timers never jump or oscillate.
+pub extern "system" fn QueryPerformanceCounter(out: *mut i64) -> i32 {
+    let mut raw = 0i64;
+    let ok = host::query_performance_counter(&mut raw);
+    if ok != 0 && !out.is_null() {
+        // SAFETY: the title passes a writable LARGE_INTEGER out pointer.
+        unsafe { out.write(victory_gpu::preload::adjusted_qpc(raw)) };
+    }
+    ok
+}
+
+/// Adjusted 64-bit millisecond tick counter: stays paused in sync with
+/// [`QueryPerformanceCounter`] during preload gates.
+pub extern "system" fn GetTickCount64() -> u64 {
+    victory_gpu::preload::adjusted_tick64(host::get_tick_count64())
+}
+
 pub(crate) fn module() -> HleModule {
     HleModule {
         name: "kernel",
@@ -444,6 +462,8 @@ pub(crate) fn module() -> HleModule {
             "api-ms-win-core-processthreads-*",
             "api-ms-win-core-debug-*",
             "api-ms-win-core-errorhandling-*",
+            "api-ms-win-core-profile-*",
+            "api-ms-win-core-sysinfo-*",
             "api-ms-win-crt-runtime-*",
         ],
         exports: vec![
@@ -469,6 +489,8 @@ pub(crate) fn module() -> HleModule {
             hle_export!(TerminateProcess),
             hle_export!(SetUnhandledExceptionFilter),
             hle_export!(SetThreadPriority),
+            hle_export!(QueryPerformanceCounter),
+            hle_export!(GetTickCount64),
         ],
     }
 }
@@ -489,6 +511,8 @@ mod host {
         DisableThreadLibraryCalls, GetModuleFileNameA, GetModuleFileNameW, GetModuleHandleA,
         GetModuleHandleW, GetProcAddress, LoadLibraryExA, LoadLibraryExW,
     };
+    use windows_sys::Win32::System::Performance::QueryPerformanceCounter;
+    use windows_sys::Win32::System::SystemInformation::GetTickCount64;
     use windows_sys::Win32::System::Threading::TerminateProcess;
 
     unsafe extern "C" {
@@ -504,6 +528,16 @@ mod host {
     pub(super) fn get_module_handle_w(name: *const u16) -> *mut c_void {
         // SAFETY: see above.
         unsafe { GetModuleHandleW(name) }
+    }
+
+    pub(super) fn query_performance_counter(out: *mut i64) -> i32 {
+        // SAFETY: plain OS query into caller's local.
+        unsafe { QueryPerformanceCounter(out) }
+    }
+
+    pub(super) fn get_tick_count64() -> u64 {
+        // SAFETY: plain OS query.
+        unsafe { GetTickCount64() }
     }
 
     pub(super) fn get_module_handle_a(name: *const u8) -> *mut c_void {

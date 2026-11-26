@@ -77,6 +77,8 @@ def default_config() -> dict:
         "late_wait_lists": "1024",
         "merge_runs": "8192",
         "async_submit": True,
+        "show_after": False,
+        "texture_no_wait": False,
         "guard_rest": "50000",
         "guard_hot": "1000",
         "texture_budget_mb": "768",
@@ -251,6 +253,14 @@ class ProtonidaWindow(Gtk.ApplicationWindow):
         self._add_row(adv_grid, arow, "Async Submit", self.async_chk)
         arow += 1
 
+        pop_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        self.show_after_chk = Gtk.CheckButton(label="VICTORY_SHOW_AFTER (may pop placeholders)")
+        self.tex_nowait_chk = Gtk.CheckButton(label="VICTORY_TEXTURE_NO_WAIT (may pop textures)")
+        pop_box.append(self.show_after_chk)
+        pop_box.append(self.tex_nowait_chk)
+        self._add_row(adv_grid, arow, "Streaming Trade-offs", pop_box)
+        arow += 1
+
         self.adv_entries: dict[str, Gtk.Entry] = {}
         adv_fields = [
             ("upscaler", "VICTORY_UPSCALER", "6"),
@@ -363,6 +373,8 @@ class ProtonidaWindow(Gtk.ApplicationWindow):
         self.port6_chk.set_active(bool(cfg.get("port_guard", True)))
         self.port7_chk.set_active(bool(cfg.get("port_journal", True)))
         self.async_chk.set_active(bool(cfg.get("async_submit", True)))
+        self.show_after_chk.set_active(bool(cfg.get("show_after", False)))
+        self.tex_nowait_chk.set_active(bool(cfg.get("texture_no_wait", False)))
 
         for key, entry in self.adv_entries.items():
             entry.set_text(str(cfg.get(key, "")))
@@ -383,6 +395,8 @@ class ProtonidaWindow(Gtk.ApplicationWindow):
             "port_guard": self.port6_chk.get_active(),
             "port_journal": self.port7_chk.get_active(),
             "async_submit": self.async_chk.get_active(),
+            "show_after": self.show_after_chk.get_active(),
+            "texture_no_wait": self.tex_nowait_chk.get_active(),
             "extra_env": extra_env,
         }
         for key, entry in self.adv_entries.items():
@@ -518,11 +532,11 @@ class ProtonidaWindow(Gtk.ApplicationWindow):
         env["VICTORY_CARD_STEPS"] = "2"
         env["VICTORY_MAP_THREADS"] = "1"
         env["VICTORY_CARD_AWAKE"] = "1"
-        env["VICTORY_SHOW_AFTER"] = "0"
+        env["VICTORY_SHOW_AFTER"] = "1" if self.cfg.get("show_after") else "0"
         env["VICTORY_LAND_SKIP"] = "1"
         env["VICTORY_GUARD_REST"] = self.cfg["guard_rest"]
         env["VICTORY_GUARD_HOT"] = self.cfg["guard_hot"]
-        env["VICTORY_TEXTURE_NO_WAIT"] = "1"
+        env["VICTORY_TEXTURE_NO_WAIT"] = "1" if self.cfg.get("texture_no_wait") else "0"
         env["VICTORY_THIN"] = "1"
         env["VICTORY_JOIN_PARTS"] = "8"
         env["VICTORY_UPLOAD_AHEAD"] = "1"
