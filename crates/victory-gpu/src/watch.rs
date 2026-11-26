@@ -2453,7 +2453,7 @@ fn hot_rest() -> std::time::Duration {
     }
     static MS: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
     let ms = *MS.get_or_init(|| {
-        std::env::var("VICTORY_GUARD_HOT").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(0).min(1000)
+        std::env::var("VICTORY_GUARD_HOT").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(0).min(60_000)
     });
     if ms == 0 || !port_guard() {
         return std::time::Duration::ZERO;

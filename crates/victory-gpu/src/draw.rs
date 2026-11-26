@@ -580,7 +580,7 @@ pub(crate) static HEAP_BUFFER_MICROS: AtomicU64 = AtomicU64::new(0);
 pub(crate) static HEAP_SPLIT: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
 
 /// Passes after which every buffer slot of the heap was looked at again.
-const HEAP_ROUND: u64 = 16;
+const HEAP_ROUND: u64 = 64;
 
 /// Whether the slots looked at again for no write are a part of them at
 /// every pass, each slot at every sixteenth (`VICTORY_HEAP_SPREAD=0`: all of
@@ -619,7 +619,7 @@ pub(crate) struct BufferSweep {
     // frame does not rescan every slot in `ranges`.
     part_spans: [crate::host::ByCopy<(std::sync::Arc<crate::shadow::Shadow>, u64, u64)>; HEAP_ROUND as usize],
     part_views: [u32; HEAP_ROUND as usize],
-    dirty_parts: u16,
+    dirty_parts: u64,
     // Last refresh frame and covered interval for throttled, unwatched copies.
     unwatched: std::collections::HashMap<u64, (u64, u64, u64)>,
 }
@@ -652,7 +652,7 @@ impl BufferSweep {
         let p = part as usize;
         self.part_spans[p].clear();
         self.part_views[p] = 0;
-        self.dirty_parts &= !(1u16 << p);
+        self.dirty_parts &= !(1u64 << p);
     }
 
     fn set(&mut self, slot: u32, range: Option<(std::sync::Arc<crate::shadow::Shadow>, u64, u64)>) {
@@ -663,7 +663,7 @@ impl BufferSweep {
             (Some(_), None) => self.part_views[p] -= 1,
             _ => {}
         }
-        if self.dirty_parts & (1u16 << p) != 0 {
+        if self.dirty_parts & (1u64 << p) != 0 {
             return;
         }
         if let Some((old_shadow, old_from, old_to)) = old {
@@ -683,7 +683,7 @@ impl BufferSweep {
                     return;
                 }
             }
-            self.dirty_parts |= 1u16 << p;
+            self.dirty_parts |= 1u64 << p;
             return;
         }
         if let Some((shadow, from, to)) = range {
