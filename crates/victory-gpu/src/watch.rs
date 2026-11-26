@@ -2498,7 +2498,7 @@ impl Guards {
 
     /// A write fault opened `block`.
     fn opened(&self, block: usize) {
-        const MANY: usize = 1 << 13;
+        const MANY: usize = 1 << 16;
         let rest = rest();
         let mut opened = self.opened.lock().unwrap_or_else(|e| e.into_inner());
         if opened.len() >= MANY {

@@ -59,7 +59,7 @@
 | Port 1 + `LATE_WAIT=2` + 720p (`UPSCALER=6`) + impostor skip | 11.7 FPS | — | 4.6–5.2 FPS | ~110 ms |
 | `CARD_BUFFERS_MIN_KB=64` + `BufferSweep` + parallel readbacks | 17.3 FPS | — | 12.1 FPS | 0–17 ms |
 | **Protonida — Series S + Screen-Space SH GI** (`BVH_BUILDER=0`, `SKIP_RT=1`) | **25.7–29.3 FPS** | **25.3 FPS** | **20.4 FPS** | **0.0 ms** |
-| **Protonida — Series S + Hardware RTX** (`BVH_BUILDER=1`, `rtDynamicShadows=false`) | **22.8 FPS** | **20.6 FPS** | **17.2–18.7 FPS** | **0.0–0.4 ms** |
+| **Protonida — Series S + Hardware RTX** (`BVH_BUILDER=1`, `rtDynamicShadows=false`) | **27.0 FPS** | **20.9 FPS** | **17.2–18.7 FPS** | **0.0–0.4 ms** |
 
 ---
 
@@ -79,6 +79,8 @@
   - **Port 7 (`VICTORY_PORT_JOURNAL=1`)**: 64-way sharded journal locks + submit-time heap sync.
 - **NVIDIA 1M-heap `CreateCommittedResource` storm fix**: Eliminated 19,761 unnecessary per-view buffer allocations (`OWN_MADE: 19,761 → 2`, saving ~230 ms/frame).
 - **4× lighter per-frame buffer sweep (`HEAP_ROUND = 64`)** + `BufferSweep` span cache & parallel texture readbacks (`XaviFortes/VIctory-RDNA`).
+- **Cross-stage CBV descriptor table sharing (`VICTORY_TABLE_STAGES`, default ON)** — eliminates duplicate dynamic descriptor allocations & CBV copies when VS/MS and PS read the same root table (`fxceless` `5d659e0`).
+- **Wine hot-block table expansion (`MANY = 65,536`)** — prevents hot-guard table wipes under long `VICTORY_GUARD_HOT` windows (`30 s`).
 - **NVIDIA dynamic descriptor word-search & early slot release** (`avatarmanz` PR #237).
 - **Optional RT pass skipping (`VICTORY_SKIP_RT=1`)**: Skips 15 unused ray-tracing compute passes and their VRAM allocations when running in non-RT mode.
 
@@ -113,7 +115,7 @@ export VICTORY_PORT_CONSTANTS=1 VICTORY_PORT_DESCRIPTORS=1 VICTORY_PORT_GUARD=1 
 export VICTORY_PORT_DESCRIPTORS_EVERY=32 VICTORY_PORT_DESCRIPTORS_CHECK=2
 export VICTORY_LATE_WAIT=3 VICTORY_LATE_WAIT_LISTS=1024 VICTORY_MERGE_RUNS=8192 VICTORY_ASYNC_SUBMIT=1
 export VICTORY_INPLACE=1 VICTORY_INPLACE_MB=4096
-export VICTORY_GUARD_REST=50000 VICTORY_GUARD_HOT=15000
+export VICTORY_GUARD_REST=250000 VICTORY_GUARD_HOT=30000
 export VICTORY_TEXTURE_BUDGET_MB=768 VICTORY_CARD_ROOM_FOR_TARGETS_MB=2304
 export VICTORY_CARD_BUFFERS_MIN_KB=64 VICTORY_CARD_BUFFERS_MB=1024
 export VICTORY_PIPELINE_WORKERS=2 VICTORY_PIPELINE_WAIT_MS=0
