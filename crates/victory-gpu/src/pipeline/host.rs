@@ -628,9 +628,42 @@ impl HostPipeline {
             let pso = match made {
                 Ok(pso) => pso,
                 Err(e) => {
-                    tracing::warn!(error = %e, ?shaders, "host pipeline refused");
-                    host.log_messages();
-                    return None;
+                    // If the host driver refused a stale cached compute shader (e.g. pre-Wave32
+                    // loose-LDS lowering), re-translate just this one shader fresh and retry.
+                    let retried = stages
+                        .first()
+                        .and_then(|(s, _)| crate::shader_cache::host_shader_fresh(&s.container).ok())
+                        .and_then(|fresh| {
+                            let fresh_cs = D3D12_SHADER_BYTECODE {
+                                pShaderBytecode: fresh.dxil.as_ptr().cast(),
+                                BytecodeLength: fresh.dxil.len(),
+                            };
+                            let fresh_desc = D3D12_COMPUTE_PIPELINE_STATE_DESC {
+                                // SAFETY: borrowed pointer never released by desc.
+                                pRootSignature: unsafe { std::mem::transmute_copy(&root) },
+                                CS: fresh_cs,
+                                ..Default::default()
+                            };
+                            let fresh_name =
+                                super::library::name("compute", &root_blob, &[&fresh.dxil], "");
+                            super::library::pipeline(
+                                &fresh_name,
+                                |library, name| unsafe { library.LoadComputePipeline(name, &fresh_desc) },
+                                || unsafe { host.device.CreateComputePipelineState(&fresh_desc) },
+                            )
+                            .ok()
+                        });
+                    match retried {
+                        Some(pso) => {
+                            tracing::info!(?shaders, "host compute pipeline accepted after fresh Wave32 re-translation");
+                            pso
+                        }
+                        None => {
+                            tracing::warn!(error = %e, ?shaders, "host pipeline refused");
+                            host.log_messages();
+                            return None;
+                        }
+                    }
                 }
             };
             tracing::info!(?shaders, "host pipeline");

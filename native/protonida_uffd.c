@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/ioctl.h>
+#include <sys/mman.h>
 #include <sys/syscall.h>
 #include <unistd.h>
 
@@ -34,6 +35,7 @@ struct ProtonidaUffdVtable {
 static int g_uffd_fd = -1;
 static int g_pagemap_fd = -1;
 static uint64_t g_features = 0;
+static int g_nohugepage = 0;
 
 static inline uint64_t align_down_4k(uint64_t v) {
     return v & ~(PAGE_SIZE_4K - 1ULL);
@@ -74,6 +76,10 @@ static int32_t bridge_register(uint64_t addr, uint64_t len) {
     uint64_t end = align_up_4k(addr + len);
     if (end <= start) {
         return -EINVAL;
+    }
+    if (g_nohugepage) {
+        /* Disable THP on tracked range to prevent 2 MiB dirty-page amplification */
+        (void)madvise((void *)(uintptr_t)start, (size_t)(end - start), MADV_NOHUGEPAGE);
     }
     struct uffdio_register reg;
     memset(&reg, 0, sizeof(reg));
@@ -195,28 +201,45 @@ static struct ProtonidaUffdVtable g_vtable = {
 
 __attribute__((constructor))
 static void protonida_uffd_init(void) {
-    /* Only initialize if requested (or always when preloaded; harmless if unused) */
+    const char *nhp = getenv("VICTORY_UFFD_NOHUGEPAGE");
+    g_nohugepage = (nhp != NULL && nhp[0] == '1') ? 1 : 0;
+
+    /* Step 1: Explicit UFFDIO_API(features=0) capability probe */
+    int probe_fd = (int)syscall(__NR_userfaultfd, O_CLOEXEC | O_NONBLOCK | UFFD_USER_MODE_ONLY);
+    if (probe_fd < 0) {
+        return;
+    }
+    struct uffdio_api probe;
+    memset(&probe, 0, sizeof(probe));
+    probe.api = UFFD_API;
+    probe.features = 0;
+    if (ioctl(probe_fd, UFFDIO_API, &probe) < 0) {
+        close(probe_fd);
+        return;
+    }
+    uint64_t supported = probe.features;
+    close(probe_fd);
+
+    if ((supported & UFFD_FEATURE_WP_ASYNC) == 0) {
+        return;
+    }
+
+    /* Step 2: Open real uffd and enable supported subset of desired features */
     int fd = (int)syscall(__NR_userfaultfd, O_CLOEXEC | O_NONBLOCK | UFFD_USER_MODE_ONLY);
     if (fd < 0) {
         return;
     }
-
+    uint64_t desired = UFFD_FEATURE_WP_ASYNC
+                     | UFFD_FEATURE_WP_UNPOPULATED
+                     | UFFD_FEATURE_WP_HUGETLBFS_SHMEM;
     struct uffdio_api api;
     memset(&api, 0, sizeof(api));
     api.api = UFFD_API;
-    api.features = UFFD_FEATURE_WP_ASYNC | UFFD_FEATURE_WP_UNPOPULATED | UFFD_FEATURE_WP_HUGETLBFS_SHMEM;
-
+    api.features = desired & supported;
     if (ioctl(fd, UFFDIO_API, &api) < 0) {
-        /* Retry without SHMEM in case kernel lacks it */
-        memset(&api, 0, sizeof(api));
-        api.api = UFFD_API;
-        api.features = UFFD_FEATURE_WP_ASYNC | UFFD_FEATURE_WP_UNPOPULATED;
-        if (ioctl(fd, UFFDIO_API, &api) < 0) {
-            close(fd);
-            return;
-        }
+        close(fd);
+        return;
     }
-
     if ((api.features & UFFD_FEATURE_WP_ASYNC) == 0) {
         close(fd);
         return;

@@ -3556,9 +3556,10 @@ pub(crate) fn page_writes() -> u8 {
     *MODE.get_or_init(|| match std::env::var("VICTORY_PAGE_WRITES").as_deref().map(str::trim) {
         Ok("0") => 0,
         Ok("1") => 3,
+        Ok("guards") => 1,
         Ok("slots") => 2,
         Ok("all") => 7,
-        _ => 1,
+        _ => 3,
     })
 }
 

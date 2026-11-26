@@ -180,6 +180,17 @@ pub(crate) fn host_shader(container: &[u8]) -> Result<HostShader, String> {
     }
 }
 
+/// Re-translates `container` with the current translator if its cached entry
+/// came from an earlier build, replacing the stale entry on disk. Used when
+/// the host driver refuses a stale cached compute pipeline (e.g. Wave64 -> Wave32).
+pub(crate) fn host_shader_fresh(container: &[u8]) -> Result<HostShader, String> {
+    let translate = |c: &[u8]| victory_shader::emit::translate(c).map_err(|e| e.to_string());
+    match CACHE.get() {
+        Some(cache) => cached(cache, &build(), container, translate, true),
+        None => translate(container),
+    }
+}
+
 /// The cache entry's converter: the build and the container in, the
 /// encoded translation out. `ran` tells a miss from a hit.
 struct Translate<'a, F> {

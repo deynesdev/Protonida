@@ -188,6 +188,75 @@ static VIEW_SCANS: AtomicU64 = AtomicU64::new(0);
 pub(crate) static HASH_NS: AtomicU64 = AtomicU64::new(0);
 pub(crate) static UPLOAD_COPY_NS: AtomicU64 = AtomicU64::new(0);
 pub(crate) static UPLOAD_BYTES: AtomicU64 = AtomicU64::new(0);
+pub(crate) static RESCAN_ITERATIONS: AtomicU64 = AtomicU64::new(0);
+pub(crate) static UPLOAD_RETRIES: AtomicU64 = AtomicU64::new(0);
+
+/// Descriptor cache & Root CBV telemetry (logged when `VICTORY_DESCRIPTOR_STATS=1` or `VICTORY_UFFD_STATS=1`).
+pub(crate) static DESCRIPTOR_CACHE_HITS: AtomicU64 = AtomicU64::new(0);
+pub(crate) static DESCRIPTOR_CACHE_MISSES: AtomicU64 = AtomicU64::new(0);
+pub(crate) static DESCRIPTOR_HEAP_PEAK: AtomicU64 = AtomicU64::new(0);
+pub(crate) static DESCRIPTOR_COPY_COUNT: AtomicU64 = AtomicU64::new(0);
+pub(crate) static ROOT_CBV_BIND_COUNT: AtomicU64 = AtomicU64::new(0);
+
+pub(crate) fn descriptor_stats_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var_os("VICTORY_DESCRIPTOR_STATS").is_some_and(|v| v == "1")
+            || std::env::var_os("VICTORY_UFFD_STATS").is_some_and(|v| v == "1")
+    })
+}
+
+pub(crate) fn note_heap_used(used: u64) {
+    DESCRIPTOR_HEAP_PEAK.fetch_max(used, Ordering::Relaxed);
+}
+
+/// Lock-free scan -> copy -> rescan -> retry snapshot helper for UFFD-tracked
+/// guest memory ranges. Avoids pausing guest threads globally by re-copying
+/// only pages dirtied concurrently during the copy, up to `MAX_RETRIES` times.
+#[allow(dead_code)]
+pub(crate) fn copy_consistent_snapshot(start: usize, dst: &mut [u8], is_view: bool) -> bool {
+    const MAX_RETRIES: usize = 4;
+    if dst.is_empty() || bridge().is_none() {
+        return false;
+    }
+    let end = start.saturating_add(dst.len());
+    // Initial copy of the range
+    // SAFETY: caller ensures `[start, end)` is readable guest memory.
+    unsafe { std::ptr::copy_nonoverlapping(start as *const u8, dst.as_mut_ptr(), dst.len()) };
+    UPLOAD_BYTES.fetch_add(dst.len() as u64, Ordering::Relaxed);
+    for attempt in 0..MAX_RETRIES {
+        RESCAN_ITERATIONS.fetch_add(1, Ordering::Relaxed);
+        let Some(dirty) = scan_pages_64k(start, end, is_view) else {
+            return false;
+        };
+        if dirty.is_empty() {
+            return true;
+        }
+        UPLOAD_RETRIES.fetch_add(1, Ordering::Relaxed);
+        let page_64k = crate::watch::PAGE;
+        for (page, parts) in dirty {
+            for bit in 0..16u16 {
+                if (parts & (1 << bit)) == 0 {
+                    continue;
+                }
+                let p_start = page * page_64k + usize::from(bit) * KERNEL_PAGE;
+                let p_end = (p_start + KERNEL_PAGE).min(end);
+                let lo = p_start.max(start);
+                if lo < p_end {
+                    let off = lo - start;
+                    let len = p_end - lo;
+                    // SAFETY: `[lo, p_end)` lies inside `[start, end)`.
+                    unsafe { std::ptr::copy_nonoverlapping(lo as *const u8, dst.as_mut_ptr().add(off), len) };
+                    UPLOAD_BYTES.fetch_add(len as u64, Ordering::Relaxed);
+                }
+            }
+        }
+        if attempt + 1 == MAX_RETRIES {
+            return true;
+        }
+    }
+    true
+}
 
 pub(crate) fn register_private(at: usize, len: usize) -> bool {
     let Some(b) = bridge() else {
@@ -371,32 +440,44 @@ const fn libc_enospc() -> i32 {
 }
 
 pub(crate) fn stats_line(frames: f64) {
-    let Some(b) = bridge() else {
-        return;
-    };
-    let scans = SCANS.swap(0, Ordering::Relaxed) as f64 / frames;
-    let view_scans = VIEW_SCANS.swap(0, Ordering::Relaxed) as f64 / frames;
-    let scan_ms = SCAN_NS.swap(0, Ordering::Relaxed) as f64 / 1e6 / frames;
-    let dirty_4k = DIRTY_4K.swap(0, Ordering::Relaxed) as f64 / frames;
-    let regions = DIRTY_REGIONS.swap(0, Ordering::Relaxed) as f64 / frames;
-    let fallbacks = FALLBACKS.swap(0, Ordering::Relaxed) as f64 / frames;
-    let reg_ok = REG_OK.load(Ordering::Relaxed);
-    let reg_fail = REG_FAIL.load(Ordering::Relaxed);
-    if b.stats_on {
-        let hash_ms = HASH_NS.swap(0, Ordering::Relaxed) as f64 / 1e6 / frames;
-        let copy_ms = UPLOAD_COPY_NS.swap(0, Ordering::Relaxed) as f64 / 1e6 / frames;
-        let copy_mb = UPLOAD_BYTES.swap(0, Ordering::Relaxed) as f64 / 1e6 / frames;
+    if let Some(b) = bridge() {
+        let scans = SCANS.swap(0, Ordering::Relaxed) as f64 / frames;
+        let view_scans = VIEW_SCANS.swap(0, Ordering::Relaxed) as f64 / frames;
+        let scan_us = SCAN_NS.swap(0, Ordering::Relaxed) as f64 / 1e3 / frames;
+        let dirty_4k = DIRTY_4K.swap(0, Ordering::Relaxed) as f64 / frames;
+        let regions = DIRTY_REGIONS.swap(0, Ordering::Relaxed) as f64 / frames;
+        let fallbacks = FALLBACKS.swap(0, Ordering::Relaxed) as f64 / frames;
+        let rescans = RESCAN_ITERATIONS.swap(0, Ordering::Relaxed) as f64 / frames;
+        let retries = UPLOAD_RETRIES.swap(0, Ordering::Relaxed) as f64 / frames;
+        let reg_ok = REG_OK.load(Ordering::Relaxed);
+        let reg_fail = REG_FAIL.load(Ordering::Relaxed);
+        if b.stats_on {
+            let hash_ms = HASH_NS.swap(0, Ordering::Relaxed) as f64 / 1e6 / frames;
+            let copy_ms = UPLOAD_COPY_NS.swap(0, Ordering::Relaxed) as f64 / 1e6 / frames;
+            let copy_bytes = UPLOAD_BYTES.swap(0, Ordering::Relaxed) as f64 / frames;
+            tracing::info!(
+                "UFFD WP async per frame: uffd_scan_us={scan_us:.0} ({scans:.1} scans, {view_scans:.1} view), \
+                 dirty_pages={dirty_4k:.0} (4K) in dirty_regions={regions:.0}, dirty_rescan_iterations={rescans:.1}, \
+                 dirty_upload_retries={retries:.1}, dirty_upload_bytes={copy_bytes:.0}, fallbacks={fallbacks:.1}, \
+                 reg_ok={reg_ok} reg_fail={reg_fail}; hash_ms={hash_ms:.2}, upload_copy_ms={copy_ms:.2}"
+            );
+        } else {
+            tracing::info!(
+                "UFFD WP async per frame: uffd_scan_us={scan_us:.0} ({scans:.1} scans, {view_scans:.1} view), \
+                 dirty_pages={dirty_4k:.0} (4K) in dirty_regions={regions:.0}, dirty_rescan_iterations={rescans:.1}, \
+                 dirty_upload_retries={retries:.1}, fallbacks={fallbacks:.1}, reg_ok={reg_ok} reg_fail={reg_fail}"
+            );
+        }
+    }
+    if descriptor_stats_enabled() {
+        let hits = DESCRIPTOR_CACHE_HITS.swap(0, Ordering::Relaxed) as f64 / frames;
+        let misses = DESCRIPTOR_CACHE_MISSES.swap(0, Ordering::Relaxed) as f64 / frames;
+        let copies = DESCRIPTOR_COPY_COUNT.swap(0, Ordering::Relaxed) as f64 / frames;
+        let root_cbvs = ROOT_CBV_BIND_COUNT.swap(0, Ordering::Relaxed) as f64 / frames;
+        let peak = DESCRIPTOR_HEAP_PEAK.load(Ordering::Relaxed);
         tracing::info!(
-            "UFFD WP async per frame: uffd_scan_ms={scan_ms:.2} ({scans:.1} scans, {view_scans:.1} view), \
-             dirty_pages={dirty_4k:.0} (4K) in dirty_regions={regions:.0}, fallbacks={fallbacks:.1}, \
-             reg_ok={reg_ok} reg_fail={reg_fail}; hash_ms={hash_ms:.2}, upload_copy_ms={copy_ms:.2}, \
-             upload_bytes={copy_mb:.2} MB"
-        );
-    } else {
-        tracing::info!(
-            "UFFD WP async per frame: uffd_scan_ms={scan_ms:.2} ({scans:.1} scans, {view_scans:.1} view), \
-             dirty_pages={dirty_4k:.0} (4K) in dirty_regions={regions:.0}, fallbacks={fallbacks:.1}, \
-             reg_ok={reg_ok} reg_fail={reg_fail}"
+            "Descriptor/RootCBV per frame: descriptor_cache_hits={hits:.0}, descriptor_cache_misses={misses:.0}, \
+             descriptor_copy_count={copies:.0}, root_cbv_bind_count={root_cbvs:.0}, descriptor_heap_peak={peak}"
         );
     }
 }

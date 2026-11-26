@@ -2047,6 +2047,23 @@ impl HostHeap {
         self.strides.as_ref().map(|s| s.1)
     }
 
+    /// Writes the stride/kind word (`VIEW_INTEGER` / `VIEW_SIGNED`) and view
+    /// address into `self.strides` for a dynamic descriptor table slot
+    /// (`index >= self.count`). Required by the face blendshape network
+    /// (`R16G16B16A16_UINT` / `R16_UINT` typed views in tables — flamingo a1178ce8).
+    pub(crate) fn dynamic_word(&self, index: u32, view: Option<&View>) {
+        if let Some((_, _, data)) = &self.strides
+            && index >= self.count
+            && index < victory_shader::emit::SLOT_STRIDES_COUNT
+        {
+            let word = view.and_then(view_stride).unwrap_or(0) | view.map_or(0, view_kind);
+            // SAFETY: inside the mapping; the slot is this caller's until its
+            // flight has landed.
+            unsafe { (*data as *mut u32).add(index as usize).write_volatile(word) };
+            write_view_address(*data, index, view);
+        }
+    }
+
     /// The table's buffer, for a list to hold.
     pub(crate) fn strides_buffer(&self) -> Option<&ID3D12Resource> {
         self.strides.as_ref().map(|s| &s.0)
@@ -2944,6 +2961,7 @@ impl HostHeap {
             }
             let twins = self.twins.get(index as usize).is_some();
             if !views.made.contains_key(&words) {
+                crate::uffd::DESCRIPTOR_CACHE_MISSES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let view = super::view_at(words[1], words[2])?;
                 let at = 2 * views.made.len() as u32;
                 // (A constant buffer's bytes are copied for each draw.)
@@ -2959,9 +2977,12 @@ impl HostHeap {
                     tabled: None,
                 };
                 views.made.insert(words, ListView { view, at, twin, kept, listed });
+            } else {
+                crate::uffd::DESCRIPTOR_CACHE_HITS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
             let made = &views.made[&words];
             self.copy_from(index, views.slot(made.at));
+            self.dynamic_word(index, Some(&made.view));
             if made.twin && twins {
                 self.copy_from(self.raw + index, views.slot(made.at + 1));
                 self.twins[index as usize].store(true, std::sync::atomic::Ordering::Relaxed);
@@ -2981,6 +3002,8 @@ impl HostHeap {
             written.store(crate::host::coarse_ms() as u32, std::sync::atomic::Ordering::Relaxed);
         }
         let Some(host) = host() else { return };
+        crate::uffd::DESCRIPTOR_COPY_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        crate::uffd::note_heap_used(u64::from(to) + 1);
         // SAFETY: a slot of our heap, and one of this thread's heap.
         unsafe { host.device.CopyDescriptorsSimple(1, self.cpu(to), from, D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV) };
     }

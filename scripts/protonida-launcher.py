@@ -76,18 +76,21 @@ def default_config() -> dict:
         "late_wait": "3",
         "late_wait_lists": "1024",
         "async_submit": True,
+        "vsync": False,
         "show_after": False,
         "texture_no_wait": False,
+        "uffd_wp": False,
+        "skip_dirty_hash": False,
         "guard_rest": "50000",
         "guard_hot": "1000",
-        "texture_budget_mb": "768",
-        "card_room_for_targets_mb": "2304",
+        "texture_budget_mb": "512",
+        "card_room_for_targets_mb": "1536",
         "card_buffers_min_kb": "64",
-        "card_buffers_mb": "1024",
+        "card_buffers_mb": "256",
         "inplace_mb": "4096",
-        "pipeline_workers": "2",
+        "pipeline_workers": "4",
         "pipeline_wait_ms": "0",
-        "ambient_shgi": "2.0",
+        "ambient_shgi": "1.0",
         "ambient_air": "1.5",
         "skip_pipelines": DEFAULT_SKIP_PIPELINES,
         "extra_env": "",
@@ -248,8 +251,12 @@ class ProtonidaWindow(Gtk.ApplicationWindow):
         self._add_row(adv_grid, arow, "Renderer Ports", ports_box)
         arow += 1
 
+        sub_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
         self.async_chk = Gtk.CheckButton(label="VICTORY_ASYNC_SUBMIT=1 (requires LATE_WAIT=3)")
-        self._add_row(adv_grid, arow, "Async Submit", self.async_chk)
+        self.vsync_chk = Gtk.CheckButton(label="VSync + Latency=1 (smooth 30 FPS cutscenes)")
+        sub_box.append(self.async_chk)
+        sub_box.append(self.vsync_chk)
+        self._add_row(adv_grid, arow, "Submission & Pacing", sub_box)
         arow += 1
 
         pop_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
@@ -260,11 +267,15 @@ class ProtonidaWindow(Gtk.ApplicationWindow):
         self._add_row(adv_grid, arow, "Streaming Trade-offs", pop_box)
         arow += 1
 
-        self.uffd_chk = Gtk.CheckButton(label="Linux UFFD WP Async + PAGEMAP_SCAN (experimental)")
+        dirty_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        self.uffd_chk = Gtk.CheckButton(label="Linux UFFD WP Async + PAGEMAP_SCAN")
+        self.skip_hash_chk = Gtk.CheckButton(label="Skip Dirty-Page Hash (VICTORY_SKIP_DIRTY_HASH=1)")
         uffd_so = REPO_ROOT / "native" / "libprotonida_uffd.so"
         if not uffd_so.exists():
             self.uffd_chk.set_tooltip_text(f"Build native bridge first: {REPO_ROOT / 'scripts' / 'build-uffd-bridge.sh'}")
-        self._add_row(adv_grid, arow, "Dirty-Memory Tracker", self.uffd_chk)
+        dirty_box.append(self.uffd_chk)
+        dirty_box.append(self.skip_hash_chk)
+        self._add_row(adv_grid, arow, "Dirty-Memory Tracker", dirty_box)
         arow += 1
 
         self.adv_entries: dict[str, Gtk.Entry] = {}
@@ -283,7 +294,7 @@ class ProtonidaWindow(Gtk.ApplicationWindow):
             ("inplace_mb", "VICTORY_INPLACE_MB", "4096"),
             ("pipeline_workers", "PIPELINE_WORKERS", "2"),
             ("pipeline_wait_ms", "PIPELINE_WAIT_MS", "0"),
-            ("ambient_shgi", "AMBIENT (when RTX Off)", "2.0"),
+            ("ambient_shgi", "AMBIENT (when RTX Off)", "1.0"),
             ("ambient_air", "VICTORY_AMBIENT_AIR", "1.5"),
             ("skip_pipelines", "VICTORY_SKIP_PIPELINES", DEFAULT_SKIP_PIPELINES),
             ("victory_exe", "victory.exe Path", str(DEFAULT_VICTORY_EXE)),
@@ -383,9 +394,11 @@ class ProtonidaWindow(Gtk.ApplicationWindow):
         self.port6_chk.set_active(bool(cfg.get("port_guard", True)))
         self.port7_chk.set_active(bool(cfg.get("port_journal", True)))
         self.async_chk.set_active(bool(cfg.get("async_submit", True)))
+        self.vsync_chk.set_active(bool(cfg.get("vsync", False)))
         self.show_after_chk.set_active(bool(cfg.get("show_after", False)))
         self.tex_nowait_chk.set_active(bool(cfg.get("texture_no_wait", False)))
         self.uffd_chk.set_active(bool(cfg.get("uffd_wp", False)))
+        self.skip_hash_chk.set_active(bool(cfg.get("skip_dirty_hash", False)))
 
         for key, entry in self.adv_entries.items():
             entry.set_text(str(cfg.get(key, "")))
@@ -406,9 +419,11 @@ class ProtonidaWindow(Gtk.ApplicationWindow):
             "port_guard": self.port6_chk.get_active(),
             "port_journal": self.port7_chk.get_active(),
             "async_submit": self.async_chk.get_active(),
+            "vsync": self.vsync_chk.get_active(),
             "show_after": self.show_after_chk.get_active(),
             "texture_no_wait": self.tex_nowait_chk.get_active(),
             "uffd_wp": self.uffd_chk.get_active(),
+            "skip_dirty_hash": self.skip_hash_chk.get_active(),
             "extra_env": extra_env,
         }
         for key, entry in self.adv_entries.items():
@@ -523,10 +538,18 @@ class ProtonidaWindow(Gtk.ApplicationWindow):
         env["VICTORY_LATE_WAIT"] = self.cfg["late_wait"]
         env["VICTORY_LATE_WAIT_LISTS"] = self.cfg["late_wait_lists"]
         env["VICTORY_ASYNC_SUBMIT"] = "1" if self.cfg["async_submit"] else "0"
+        if self.cfg.get("vsync"):
+            env["VICTORY_VSYNC"] = "1"
+            env["VKD3D_SWAPCHAIN_LATENCY_FRAMES"] = "1"
+        else:
+            env["VICTORY_VSYNC"] = "0"
+        if self.cfg.get("skip_dirty_hash"):
+            env["VICTORY_SKIP_DIRTY_HASH"] = "1"
         env["VICTORY_INPLACE"] = "1"
         env["VICTORY_INPLACE_MB"] = self.cfg["inplace_mb"]
         env["VICTORY_PLANES"] = "1"
         env["VICTORY_TEXTURE_BUDGET_MB"] = self.cfg["texture_budget_mb"]
+        env.setdefault("VICTORY_TEXTURE_STAGE_MB", "64")
         env["VICTORY_CARD_ROOM_FOR_TARGETS_MB"] = self.cfg["card_room_for_targets_mb"]
         env["VICTORY_CARD_BUFFERS_MIN_KB"] = self.cfg["card_buffers_min_kb"]
         env["VICTORY_CARD_BUFFERS_MB"] = self.cfg["card_buffers_mb"]
@@ -558,11 +581,13 @@ class ProtonidaWindow(Gtk.ApplicationWindow):
         if self.cfg["rtx_mode"] == "off":
             env["VICTORY_BVH_BUILDER"] = "0"
             env["VICTORY_SKIP_RT"] = "1"
-            env["VICTORY_AMBIENT"] = self.cfg["ambient_shgi"] or "2.0"
+            env["VICTORY_AMBIENT"] = self.cfg["ambient_shgi"] or "1.0"
+            env.pop("VICTORY_AMBIENT_RT", None)
         else:
             env["VICTORY_BVH_BUILDER"] = "1"
             env["VICTORY_SKIP_RT"] = "0"
             env["VICTORY_AMBIENT"] = "off"
+            env.setdefault("VICTORY_AMBIENT_RT", "0.35,2.5,0.8")
 
         if self.cfg.get("uffd_wp"):
             uffd_so = REPO_ROOT / "native" / "libprotonida_uffd.so"

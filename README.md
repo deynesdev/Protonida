@@ -86,7 +86,7 @@
 - **Wine-native memory & write-watch tracking (`watch.rs`, `xmem.rs`)**: Tracks placeholder/watched reservations in-process to eliminate refused `GetWriteWatch` calls (`293 → 0`) and `VirtualQuery` hole scans (`6,705 → 14`), plus batched contiguous `VirtualProtect(..., PAGE_READWRITE)` unguarding (`LoverCatys c0a3a1ff`).
 - **Wine hot-guard tuning (`VICTORY_GUARD_HOT=1000`, `VICTORY_GUARD_REST=50000`, `MANY = 65,536`)**: Cuts `wineserver` `VirtualProtect` IPC faults and guard refreshes without introducing stale-frame artifacts.
 - **Opt-in Linux `UFFD_FEATURE_WP_ASYNC` + `PAGEMAP_SCAN` bridge (`native/protonida_uffd.c`, `VICTORY_UFFD_WP=1`)**: Experimental `LD_PRELOAD` bridge bypassing `wineserver` IPC (kept opt-in after benchmarking showed `VirtualProtect` + `PUBLISHED` is faster on multi-GiB `MEM_MAPPED` views).
-- **Frametime percentile telemetry (`p50 / p95 / p99 / max`)**: Logged every 5 seconds in `victory_gpu::host` alongside FPS and copy/texture timings.
+- **Frametime percentile telemetry (`p50 / p95 / p99 / max`) & ring-buffer CSV (`VICTORY_FRAME_DIAG`)**: Logged every 5 seconds in `victory_gpu::host` alongside FPS, VRAM, descriptor stats (`VICTORY_DESCRIPTOR_STATS=1`), and optional async per-frame CSV output; plus opt-in swapchain VSync (`VICTORY_VSYNC=1` + `VKD3D_SWAPCHAIN_LATENCY_FRAMES=1`, eliminating 2D/Bink intro cadence spikes).
 - **16 MB pipeline worker stacks**: Prevents silent Wine 2 MB default thread stack overflows during shader translation.
 - **Portable static `libunwind` (`+crt-static`) + AVX2 (`x86-64-v3`) + Thin LTO (`codegen-units = 1`)**: Zero `llvm-mingw` runtime DLL dependencies (`libunwind.dll` eliminated) and maximum CPU throughput across hot copy, hash, and descriptor loops.
 
@@ -105,7 +105,10 @@
 - **Optional RT pass skipping (`VICTORY_SKIP_RT=1`)**: Skips 15 unused ray-tracing compute passes and their VRAM allocations when running in non-RT mode.
 
 ### Series S Graphics & Shader Correctness
-- **Native Hardware Ray Tracing (`VICTORY_BVH_BUILDER=1`)**: All 53 BVH structure builder pipelines run natively on NVIDIA RTX via `vkd3d-proton`.
+- **Native Hardware Ray Tracing (`VICTORY_BVH_BUILDER=1`) + RT indoor ambient band (`VICTORY_AMBIENT_RT`)** (`avatarmanz 77137b98`): All 53 BVH structure builder pipelines run natively on NVIDIA RTX via `vkd3d-proton`, while `VICTORY_AMBIENT_RT=0.35,2.5,0.8` prevents crushed black indoor rooms without washing out RTGI detail.
+- **Renderer Port 1 indirect ordering (`VICTORY_PORT_CONSTANTS_ORDER`)** (`avatarmanz 631400f5..15c3d0ea`): Clamps in-place indirect arguments right before execution to eliminate tree/palm and lamp-lit room flicker.
+- **DirectStorage black-face fix (`VICTORY_PAGE_WRITES=3`), dynamic table `VIEW_INTEGER` (`HostHeap::dynamic_word`), and split-submission slot release** (`fxceless e4245f3c` / `#1320`, `flamingo a1178ce8`): Re-queues texture slots under DirectStorage writes, populates `self.strides` for dynamic table slots, and releases split-submission descriptor slots.
+- **Targeted Wave32 compute auto-refresh (`host_shader_fresh`) & `HostList::untouched()` upload guard** (`leonida dd306a64`): Automatically re-translates stale refused Wave64 compute pipelines (e.g. `6871d6e4b3ac9a10`) without invalidating the shader cache, and guards `plane_uploads`/`shared_uploads` while keeping pooled uploads + Kelvaroq 6 GB VRAM budgets (`VICTORY_CARD_BUFFERS_MB=256`, `VICTORY_TEXTURE_STAGE_MB=64`, `VICTORY_TEXTURE_BUDGET_MB=512`).
 - **Wave32 loose-LDS & `ds_bpermute_b32` lowering** (`leonida 76c6f04c`): Lowers Wave64 compute shaders that read/write LDS across divergent branches to NVIDIA Wave32 cleanly, plus `CalculateLOD` coordinate fix.
 - **BC7 texture rotation fix** (`fxceless` `06702fe` / upstream #3111).
 - **RDNA 2 fused `v_mad_legacy_f32`** with FTZ & zero-factor semantics (`fxceless` `f6a09d3` / PR #1026).

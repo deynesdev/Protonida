@@ -1053,7 +1053,14 @@ fn create() -> windows::core::Result<Host> {
                 .and_then(|v| v.trim().parse::<u32>().ok())
                 .filter(|&n| matches!(n, 32 | 64));
             let max_wave = override_wave.unwrap_or(o1.WaveLaneCountMax);
-            tracing::info!(min = o1.WaveLaneCountMin, max = o1.WaveLaneCountMax, effective = max_wave, "host wave lanes");
+            tracing::info!(
+                wave_ops = o1.WaveOps.as_bool(),
+                min = o1.WaveLaneCountMin,
+                max = o1.WaveLaneCountMax,
+                total_lanes = o1.TotalLaneCount,
+                effective = max_wave,
+                "host wave lanes"
+            );
             victory_shader::emit::set_host_max_wave(max_wave);
             // (RDNA has waves of 32 and 64, the vendor's older cards of 64 alone.)
             let amd = crate::indirect::amd(&device);
@@ -1994,6 +2001,14 @@ const SPARE_KEPT: u64 = 1 << 30;
 fn scratch_pool() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("VICTORY_SCRATCH_POOL").is_none_or(|v| v != "0"))
+}
+
+/// Whether [`HostList::upload`] reuses pooled `L0 WRITE_BACK` / scratch
+/// upload buffers (`VICTORY_SHARED_POOL=0` disables; on by default to avoid
+/// per-frame upload buffer VRAM churn on 6 GB GPUs, with `untouched()` guarded).
+fn shared_upload_pool() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_SHARED_POOL").is_none_or(|v| v != "0"))
 }
 
 /// Things of some sizes that nothing holds now, kept for whoever next asks
@@ -7091,6 +7106,8 @@ impl HostList {
             let deferred = self.deferred();
             if !(deferred.copies.is_empty()
                 && deferred.uploads.is_empty()
+                && deferred.plane_uploads.is_empty()
+                && deferred.shared_uploads.is_empty()
                 && deferred.kept.is_empty()
                 && deferred.textures.is_empty()
                 && deferred.writes.is_empty()
@@ -7254,7 +7271,7 @@ impl HostList {
     /// reset (power-of-two pooled up to 8 MiB to eliminate per-frame shared/upload churn).
     pub(crate) fn upload(&self, host: &Host, size: u64) -> Option<(ID3D12Resource, *mut u8)> {
         let bucket = size.max(4096).next_power_of_two();
-        if bucket > (8 << 20) || !scratch_pool() {
+        if bucket > (8 << 20) || !scratch_pool() || !shared_upload_pool() {
             // With [`card_steps`] the card may be the one that fills it.
             let (buffer, data) = if card_steps::stage() > 1 { host.shared_buffer(size)? } else { host.upload_buffer(size)? };
             name(&buffer, || format!("list upload {size:#x}"));
@@ -9237,11 +9254,42 @@ fn meter_lines(lines: impl FnOnce() + Send + 'static) {
     }
 }
 
+/// Swapchain `Present` sync interval (`VICTORY_VSYNC=0|1|2`; default `0`).
+fn vsync_interval() -> u32 {
+    static INTERVAL: OnceLock<u32> = OnceLock::new();
+    *INTERVAL.get_or_init(|| {
+        let v = std::env::var("VICTORY_VSYNC")
+            .ok()
+            .and_then(|s| s.trim().parse::<u32>().ok())
+            .map(|n| n.min(4))
+            .unwrap_or(0);
+        if v > 0 {
+            tracing::info!(sync_interval = v, "swapchain VSync enabled (VICTORY_VSYNC)");
+        }
+        v
+    })
+}
+
+/// Optional CSV output path for per-frame ring-buffer diagnostics (`VICTORY_FRAME_DIAG=<path>`).
+fn frame_diag_path() -> Option<&'static str> {
+    static PATH: OnceLock<Option<String>> = OnceLock::new();
+    PATH.get_or_init(|| {
+        std::env::var("VICTORY_FRAME_DIAG")
+            .ok()
+            .map(|s| s.trim().to_owned())
+            .filter(|s| !s.is_empty() && s != "0")
+    })
+    .as_deref()
+}
+
 struct Meter {
     last_present: windows::core::HRESULT,
+    start: std::time::Instant,
     since: std::time::Instant,
     last_frame: std::time::Instant,
     frame_us: Vec<u32>,
+    diag_ring: Vec<(u64, u64, u32)>,
+    total_frames: u64,
     frames: u32,
     #[cfg(feature = "diagnostics")]
     copy_stats_frames: u64,
@@ -9256,9 +9304,12 @@ impl Meter {
         let now = std::time::Instant::now();
         Meter {
             last_present: windows::Win32::Foundation::S_OK,
+            start: now,
             since: now,
             last_frame: now,
             frame_us: Vec::with_capacity(256),
+            diag_ring: Vec::with_capacity(if frame_diag_path().is_some() { 256 } else { 0 }),
+            total_frames: 0,
             frames: 0,
             #[cfg(feature = "diagnostics")]
             copy_stats_frames: 0,
@@ -9297,8 +9348,13 @@ impl Meter {
         let now = std::time::Instant::now();
         let dt_us = now.saturating_duration_since(self.last_frame).as_micros().min(u32::MAX as u128) as u32;
         self.last_frame = now;
+        self.total_frames += 1;
         if self.frame_us.len() < 1024 {
             self.frame_us.push(dt_us);
+        }
+        if frame_diag_path().is_some() && self.diag_ring.len() < 4096 {
+            let elapsed_us = now.saturating_duration_since(self.start).as_micros() as u64;
+            self.diag_ring.push((self.total_frames, elapsed_us, dt_us));
         }
         self.frames += 1;
         #[cfg(feature = "diagnostics")]
@@ -9327,6 +9383,11 @@ impl Meter {
         } else {
             Vec::new()
         };
+        let diag_batch = if frame_diag_path().is_some() {
+            std::mem::take(&mut self.diag_ring)
+        } else {
+            Vec::new()
+        };
         #[cfg(feature = "diagnostics")]
         let copy_stats_frames = if five { std::mem::take(&mut self.copy_stats_frames) as f64 } else { 0.0 };
         meter_lines(move || {
@@ -9343,6 +9404,34 @@ impl Meter {
             });
             let dropped = crate::draw::take_dropped() as f64 / frames;
             let indirect = crate::list::take_indirect() as f64 / frames;
+            if let Some(diag_path) = frame_diag_path()
+                && !diag_batch.is_empty()
+            {
+                use std::io::Write;
+                static HEADER_WRITTEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                let [vram_mb, shared_mb] = host()
+                    .and_then(|h| h.video_memory_groups())
+                    .map(|[own, shared]| [own[1] >> 20, shared[1] >> 20])
+                    .unwrap_or([0, 0]);
+                let failed_pso = 0u64;
+                let desc_peak = crate::uffd::DESCRIPTOR_HEAP_PEAK.load(Ordering::Relaxed);
+                if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(diag_path) {
+                    if !HEADER_WRITTEN.swap(true, Ordering::Relaxed) {
+                        let _ = writeln!(
+                            f,
+                            "frame_id,elapsed_ms,present_interval_ms,fps,draws,dropped_pso,failed_pso_total,cpu_prep_ms,copy_ms,copy_mb,texture_ms,texture_mb,gpu_wait_ms,back_ms,back_mb,vram_used_mb,shared_used_mb,desc_heap_peak"
+                        );
+                    }
+                    for (fid, elapsed_us, dt_us) in diag_batch {
+                        let _ = writeln!(
+                            f,
+                            "{fid},{:.2},{:.3},{fps:.2},{draws:.1},{dropped:.1},{failed_pso},{cpu:.2},{copy_ms:.2},{copy_mb:.2},{texture_ms:.2},{texture_mb:.2},{gpu:.2},{back_ms:.2},{back_mb:.2},{vram_mb},{shared_mb},{desc_peak}",
+                            elapsed_us as f64 / 1000.0,
+                            f64::from(dt_us) / 1000.0
+                        );
+                    }
+                }
+            }
             let mesh_largest = MESH_GROUPS[0].swap(0, Ordering::Relaxed);
             let mesh_groups = MESH_GROUPS[1].swap(0, Ordering::Relaxed) as f64 / frames;
             let refused = BUDGET_NOTES[0].swap(0, Ordering::Relaxed) as f64 / frames;
@@ -9923,7 +10012,7 @@ impl Host {
             #[cfg(feature = "diagnostics")]
             crate::replay::record::present(texture, state);
             let mut showing = crate::timeline::span("the host's Present");
-            let status = p.swap_chain.Present(0, DXGI_PRESENT(0));
+            let status = p.swap_chain.Present(vsync_interval(), DXGI_PRESENT(0));
             showing.next("the frame meter");
             #[cfg(feature = "diagnostics")]
             if status == windows::Win32::Foundation::S_OK {
