@@ -1,2 +1,10 @@
 [alias]
 xtask = "run --quiet --package xtask --"
+
+# The title needs an AVX2 CPU, so host code may use x86-64-v3 (AVX2, BMI1/2,
+# FMA, LZCNT, MOVBE). Adapted from Marvisak/VIctory#3011.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-cpu=x86-64-v3"]
+
+[target.x86_64-pc-windows-gnullvm]
+rustflags = ["-C", "target-cpu=x86-64-v3"]

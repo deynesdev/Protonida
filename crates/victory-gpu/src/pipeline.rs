@@ -67,8 +67,55 @@ pub(crate) struct Shader {
     /// Its part in the light probe (`crate::lightprobe`).
     #[cfg(windows)]
     pub(crate) probe: Option<crate::lightprobe::Role>,
+    /// Ray-tracing pass or ray-request feeder skipped when hardware RT is off
+    /// (`VICTORY_SKIP_RT`, on by default; `0` to disable). Skipping these also
+    /// prevents RT-only host textures/UAVs from being allocated on 6-8 GB VRAM.
+    #[cfg(windows)]
+    skip_rt: bool,
     #[cfg(windows)]
     translated: OnceLock<Option<Translated>>,
+}
+
+/// Ray-tracing shaders and ray-request feeder programs that waste GPU time and
+/// allocate RT-only textures when hardware ray tracing is not running.
+/// Adapted from Belobug (`6986a5714a`) and voidopcode/vilocity (`2681546144`)
+/// via LoverCatys/ruff-lab (`5601c26`).
+#[cfg(windows)]
+const RT_SKIP_PATTERNS: &[&[u8]] = &[
+    b"CS_ScreenProbes_ActivateRays",
+    b"CS_ScreenProbes_EvaluateRayRequests",
+    b"CS_SortRayTiles",
+    b"CS_Primary_RegisterAllocationRequests",
+    b"TraceRays_BVH",
+    b"RTShadowTrace",
+    b"RTDistantShadowTrace",
+    b"RTDistantLODLightShadow",
+    b"TraceShadowRays",
+    b"RaytraceShadows",
+    b"RaytraceVBuffer",
+    b"IrradianceCache_ShadowTrace",
+    b"ShadowRaytracing",
+    b"CollisionRaytraced",
+    b"PPR_Raytrace",
+];
+
+#[cfg(windows)]
+fn skip_rt_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| {
+        let on = std::env::var_os("VICTORY_SKIP_RT").is_none_or(|v| v != "0");
+        if on {
+            tracing::info!("VICTORY_SKIP_RT=1: skipping unused ray-tracing passes and their texture allocations");
+        }
+        on
+    })
+}
+
+#[cfg(windows)]
+fn matches_rt_skip(bytes: &[u8]) -> bool {
+    RT_SKIP_PATTERNS
+        .iter()
+        .any(|pat| bytes.windows(pat.len()).any(|w| w == *pat))
 }
 
 impl std::fmt::Debug for Shader {
@@ -121,6 +168,8 @@ fn shader(stage: &'static str, bytes: &[u8]) -> Arc<Shader> {
                 ambient: (stage == "compute").then(|| crate::ambient::role(bytes)).flatten(),
                 #[cfg(windows)]
                 probe: crate::lightprobe::on().then(|| crate::lightprobe::role(bytes)).flatten(),
+                #[cfg(windows)]
+                skip_rt: skip_rt_enabled() && matches_rt_skip(bytes),
                 #[cfg(windows)]
                 translated: OnceLock::new(),
             })
@@ -506,12 +555,9 @@ fn skipped_shader(p: &Pipeline) -> Option<&str> {
         let value = std::env::var("VICTORY_SKIP_PIPELINES").unwrap_or_default();
         parse_skip_hashes(&value)
     });
-    if hashes.is_empty() {
-        return None;
-    }
     p.shaders
         .iter()
-        .find(|shader| hashes.contains(&shader.hash))
+        .find(|shader| shader.skip_rt || (!hashes.is_empty() && hashes.contains(&shader.hash)))
         .map(|shader| shader.hash.as_str())
 }
 
