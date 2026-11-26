@@ -660,10 +660,23 @@ class ProtonidaWindow(Gtk.ApplicationWindow):
         if self.cfg.get("cache_dir"):
             env["VICTORY_CACHE_DIR"] = linux_to_wine_path(self.cfg["cache_dir"])
 
+        env.setdefault("VICTORY_PREBAKE_BIG_MAX", "2")
+        env.setdefault("VICTORY_PREBAKE_MIN_FREE_MB", "4096")
+
+        cpus = os.cpu_count() or 4
+        shader_jobs = str(min(max(cpus // 2, 2), 6))
+        warm_jobs = str(min(max(cpus // 2, 2), 4))
+
         game_dir_wine = linux_to_wine_path(str(Path(game_exe).parent))
         steps = [
-            ("Precompiling console shaders → DXIL", [wine_bin, victory_exe, "shaders", game_dir_wine]),
-            ("Warming host D3D12 / vkd3d-proton PSO cache", [wine_bin, victory_exe, "warm"]),
+            (
+                f"Precompiling console shaders → DXIL (jobs={shader_jobs}, max big=2, RAM guard=4 GiB)",
+                [wine_bin, victory_exe, "shaders", "--jobs", shader_jobs, game_dir_wine],
+            ),
+            (
+                f"Warming host D3D12 / vkd3d-proton PSO cache (jobs={warm_jobs})",
+                [wine_bin, victory_exe, "warm", "--jobs", warm_jobs],
+            ),
         ]
 
         self.log_expander.set_expanded(True)
@@ -673,8 +686,51 @@ class ProtonidaWindow(Gtk.ApplicationWindow):
         self.prebake_btn.set_sensitive(False)
         self.stop_btn.set_sensitive(True)
 
+        stop_watchdog = threading.Event()
+
+        def read_mem_avail_mb() -> int | None:
+            try:
+                with open("/proc/meminfo", "r", encoding="utf-8") as fh:
+                    for ln in fh:
+                        if ln.startswith("MemAvailable:"):
+                            return int(ln.split()[1]) // 1024
+            except Exception:
+                return None
+            return None
+
+        def ram_watchdog() -> None:
+            import signal
+            paused = False
+            while not stop_watchdog.wait(0.5):
+                proc = self.proc
+                if proc is None or proc.poll() is not None:
+                    continue
+                avail = read_mem_avail_mb()
+                if avail is None:
+                    continue
+                try:
+                    pgid = os.getpgid(proc.pid)
+                    if not paused and avail < 2500:
+                        os.killpg(pgid, signal.SIGSTOP)
+                        paused = True
+                        GLib.idle_add(
+                            self._append_log,
+                            f"\n[RAM Watchdog] MemAvailable={avail} MiB (<2500 MiB) — pausing prebake until RAM recovers…\n",
+                        )
+                    elif paused and avail >= 3500:
+                        os.killpg(pgid, signal.SIGCONT)
+                        paused = False
+                        GLib.idle_add(
+                            self._append_log,
+                            f"[RAM Watchdog] MemAvailable={avail} MiB — resuming prebake.\n",
+                        )
+                except Exception:
+                    pass
+
         def runner() -> None:
             last_code = 0
+            wd = threading.Thread(target=ram_watchdog, daemon=True)
+            wd.start()
             try:
                 for label, cmd in steps:
                     GLib.idle_add(self._append_log, f"\n--- {label} ---\n$ {shlex.join(cmd)}\n")
@@ -686,6 +742,7 @@ class ProtonidaWindow(Gtk.ApplicationWindow):
                         stderr=subprocess.STDOUT,
                         text=True,
                         errors="replace",
+                        start_new_session=True,
                     )
                     assert self.proc.stdout is not None
                     for line in self.proc.stdout:
@@ -697,11 +754,18 @@ class ProtonidaWindow(Gtk.ApplicationWindow):
             except Exception as exc:
                 GLib.idle_add(self._append_log, f"\nPrebake error: {exc}\n")
                 GLib.idle_add(self._on_finished, -1)
+            finally:
+                stop_watchdog.set()
 
         threading.Thread(target=runner, daemon=True).start()
 
     def _on_stop(self, _btn: Gtk.Button) -> None:
         if self.proc is not None and self.proc.poll() is None:
+            import signal
+            try:
+                os.killpg(os.getpgid(self.proc.pid), signal.SIGCONT)
+            except Exception:
+                pass
             self.proc.terminate()
             self.status_label.set_text("Stopping…")
 

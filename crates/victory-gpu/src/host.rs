@@ -1048,8 +1048,13 @@ fn create() -> windows::core::Result<Host> {
             .CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS1, (&raw mut o1).cast(), size_of_val(&o1) as u32)
             .is_ok()
         {
-            tracing::info!(min = o1.WaveLaneCountMin, max = o1.WaveLaneCountMax, "host wave lanes");
-            victory_shader::emit::set_host_max_wave(o1.WaveLaneCountMax);
+            let override_wave = std::env::var("VICTORY_HOST_WAVE")
+                .ok()
+                .and_then(|v| v.trim().parse::<u32>().ok())
+                .filter(|&n| matches!(n, 32 | 64));
+            let max_wave = override_wave.unwrap_or(o1.WaveLaneCountMax);
+            tracing::info!(min = o1.WaveLaneCountMin, max = o1.WaveLaneCountMax, effective = max_wave, "host wave lanes");
+            victory_shader::emit::set_host_max_wave(max_wave);
             // (RDNA has waves of 32 and 64, the vendor's older cards of 64 alone.)
             let amd = crate::indirect::amd(&device);
             victory_shader::emit::set_host_rdna(amd && o1.WaveLaneCountMin == 32 && o1.WaveLaneCountMax == 64);
@@ -2079,24 +2084,81 @@ fn give_chunks(chunks: Vec<(Chunk, u64)>) {
     drop(freed);
 }
 
-/// Lets go of the scratch chunks kept idle, when the system is short of
-/// memory (`VICTORY_RESIDENCY=1`, [`crate::residency::pressured`]).
+/// Shared (`L0` `WRITE_BACK`, UAV-capable) upload chunks no list holds,
+/// reused by [`HostList::upload`] when [`card_steps`] fills buffers on the GPU.
+static SHARED_SPARE: Mutex<Spare<Chunk>> = Mutex::new(Spare::new());
+
+fn shared_spare_limit(scratch_on: bool, critical: bool, pressured: bool, limited_ram: bool) -> u64 {
+    if !scratch_on || critical {
+        0
+    } else if pressured {
+        16 << 20
+    } else if limited_ram {
+        48 << 20
+    } else {
+        192 << 20
+    }
+}
+
+fn take_shared_chunk(host: &Host, size: u64) -> Option<Chunk> {
+    if scratch_pool()
+        && let Some(chunk) = SHARED_SPARE.lock().unwrap_or_else(|e| e.into_inner()).take(size)
+    {
+        return Some(chunk);
+    }
+    let (buffer, data) = host.shared_buffer(size)?;
+    name(&buffer, || format!("list shared upload {size:#x}"));
+    Some(Chunk {
+        buffer,
+        data: data as usize,
+    })
+}
+
+fn give_shared_chunks(chunks: Vec<(Chunk, u64)>) {
+    if chunks.is_empty() {
+        return;
+    }
+    let mut freed = Vec::new();
+    {
+        let mut spare = SHARED_SPARE.lock().unwrap_or_else(|e| e.into_inner());
+        let limit = shared_spare_limit(
+            scratch_pool(),
+            crate::residency::critical_commit(),
+            crate::residency::pressured(),
+            crate::residency::limited_host_ram(),
+        );
+        for (chunk, size) in chunks {
+            if let Some(chunk) = spare.give(chunk, size, limit) {
+                freed.push(chunk);
+            }
+        }
+    }
+    // Freed outside the lock.
+    drop(freed);
+}
+
+/// Drops spare scratch and shared upload chunks kept idle when host memory is pressured.
 fn trim_spare_chunks() {
     let freed: Vec<(Chunk, u64)> = {
         let mut spare = SPARE.lock().unwrap_or_else(|e| e.into_inner());
-        if spare.kept.is_empty() {
-            return;
-        }
         spare.bytes = 0;
         std::mem::take(&mut spare.kept)
     };
-    let count = freed.len() as u64;
-    let bytes: u64 = freed.iter().map(|(_, s)| *s).sum();
-    ALIVE[1].fetch_sub(count, Ordering::Relaxed);
-    ALIVE[2].fetch_sub(bytes, Ordering::Relaxed);
-    ALIVE[3].fetch_sub(count, Ordering::Relaxed);
-    ALIVE[4].fetch_sub(bytes, Ordering::Relaxed);
-    drop(freed);
+    if !freed.is_empty() {
+        let count = freed.len() as u64;
+        let bytes: u64 = freed.iter().map(|(_, s)| *s).sum();
+        ALIVE[1].fetch_sub(count, Ordering::Relaxed);
+        ALIVE[2].fetch_sub(bytes, Ordering::Relaxed);
+        ALIVE[3].fetch_sub(count, Ordering::Relaxed);
+        ALIVE[4].fetch_sub(bytes, Ordering::Relaxed);
+        drop(freed);
+    }
+    let shared_freed: Vec<(Chunk, u64)> = {
+        let mut spare = SHARED_SPARE.lock().unwrap_or_else(|e| e.into_inner());
+        spare.bytes = 0;
+        std::mem::take(&mut spare.kept)
+    };
+    drop(shared_freed);
 }
 
 /// What the host keeps for copies in the card's own memory
@@ -2373,6 +2435,11 @@ struct Deferred {
     /// Destination, source, bytes.
     copies: Vec<Step>,
     uploads: Vec<ID3D12Resource>,
+    /// Standalone upload footprints kept through this list's fence (movie planes and <=8 MiB pooled uploads).
+    plane_uploads: Vec<(Chunk, u64)>,
+    /// Shared (`L0` `WRITE_BACK`, UAV-capable) upload buffers kept through
+    /// this list's fence when [`card_steps`] fills buffers on the GPU.
+    shared_uploads: Vec<(Chunk, u64)>,
     /// The bytes of `uploads` (counted in [`ALIVE`] while they are held).
     upload_bytes: u64,
     /// Host objects the list's commands name (pipelines, root signatures,
@@ -2437,6 +2504,8 @@ impl Deferred {
 
 impl Drop for Deferred {
     fn drop(&mut self) {
+        give_chunks(std::mem::take(&mut self.plane_uploads));
+        give_shared_chunks(std::mem::take(&mut self.shared_uploads));
         ALIVE[6].fetch_sub(self.uploads.len() as u64, Ordering::Relaxed);
         ALIVE[7].fetch_sub(self.upload_bytes, Ordering::Relaxed);
     }
@@ -7182,15 +7251,27 @@ impl HostList {
     }
 
     /// A mapped upload buffer of `size` bytes, alive until the list is
-    /// reset.
-    ///
-    /// shortcut: one buffer per copy; pool them once uploads are frequent.
+    /// reset (power-of-two pooled up to 8 MiB to eliminate per-frame shared/upload churn).
     pub(crate) fn upload(&self, host: &Host, size: u64) -> Option<(ID3D12Resource, *mut u8)> {
-        // With [`card_steps`] the card may be the one that fills it.
-        let (buffer, data) = if card_steps::stage() > 1 { host.shared_buffer(size)? } else { host.upload_buffer(size)? };
-        name(&buffer, || format!("list upload {size:#x}"));
-        self.deferred().hold_upload(buffer.clone(), size);
-        Some((buffer, data))
+        let bucket = size.max(4096).next_power_of_two();
+        if bucket > (8 << 20) || !scratch_pool() {
+            // With [`card_steps`] the card may be the one that fills it.
+            let (buffer, data) = if card_steps::stage() > 1 { host.shared_buffer(size)? } else { host.upload_buffer(size)? };
+            name(&buffer, || format!("list upload {size:#x}"));
+            self.deferred().hold_upload(buffer.clone(), size);
+            return Some((buffer, data));
+        }
+        if card_steps::stage() > 1 {
+            let chunk = take_shared_chunk(host, bucket)?;
+            let (buffer, data) = (chunk.buffer.clone(), chunk.data as *mut u8);
+            self.deferred().shared_uploads.push((chunk, bucket));
+            Some((buffer, data))
+        } else {
+            let chunk = take_chunk(host, bucket)?;
+            let (buffer, data) = (chunk.buffer.clone(), chunk.data as *mut u8);
+            self.deferred().plane_uploads.push((chunk, bucket));
+            Some((buffer, data))
+        }
     }
 
     /// `len` bytes of upload memory (256-byte aligned) until the list is

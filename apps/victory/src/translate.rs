@@ -408,12 +408,129 @@ pub fn run(
 }
 
 /// Every shader found into the cache runs translate from.
+/// Semaphore capping concurrent big-shader compilations and throttling when
+/// system RAM runs low so DXC never OOMs during `victory shaders`.
+struct PrebakeGate {
+    state: Mutex<(usize, usize)>, // (active_total, active_big)
+    cv: std::sync::Condvar,
+    max_big: usize,
+    min_free_bytes: u64,
+}
+
+impl PrebakeGate {
+    fn new() -> Self {
+        let max_big = std::env::var("VICTORY_PREBAKE_BIG_MAX")
+            .ok()
+            .and_then(|v| v.trim().parse::<usize>().ok())
+            .unwrap_or(2)
+            .clamp(1, 4);
+        let min_free_mb = std::env::var("VICTORY_PREBAKE_MIN_FREE_MB")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .unwrap_or(4096);
+        Self {
+            state: Mutex::new((0, 0)),
+            cv: std::sync::Condvar::new(),
+            max_big,
+            min_free_bytes: min_free_mb << 20,
+        }
+    }
+
+    fn avail_ram_bytes() -> Option<u64> {
+        #[cfg(windows)]
+        {
+            #[repr(C)]
+            struct MemoryStatusEx {
+                dw_length: u32,
+                dw_memory_load: u32,
+                ull_total_phys: u64,
+                ull_avail_phys: u64,
+                ull_total_page_file: u64,
+                ull_avail_page_file: u64,
+                ull_total_virtual: u64,
+                ull_avail_virtual: u64,
+                ull_avail_extended_virtual: u64,
+            }
+            #[link(name = "kernel32")]
+            unsafe extern "system" {
+                fn GlobalMemoryStatusEx(buf: *mut MemoryStatusEx) -> i32;
+            }
+            let mut st = MemoryStatusEx {
+                dw_length: std::mem::size_of::<MemoryStatusEx>() as u32,
+                dw_memory_load: 0,
+                ull_total_phys: 0,
+                ull_avail_phys: 0,
+                ull_total_page_file: 0,
+                ull_avail_page_file: 0,
+                ull_total_virtual: 0,
+                ull_avail_virtual: 0,
+                ull_avail_extended_virtual: 0,
+            };
+            // SAFETY: valid MEMORYSTATUSEX struct with dwLength initialized.
+            if unsafe { GlobalMemoryStatusEx(&mut st) } != 0 {
+                return Some(st.ull_avail_phys);
+            }
+        }
+        None
+    }
+
+    fn acquire(&self, big: bool) -> PrebakePermit<'_> {
+        let mut g = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        loop {
+            let low_ram = Self::avail_ram_bytes().is_some_and(|avail| avail < self.min_free_bytes);
+            if low_ram {
+                // Under RAM pressure: allow only 1 shader compile at a time and
+                // back off briefly so finished DXC allocations can be reclaimed.
+                if g.0 == 0 {
+                    g.0 += 1;
+                    if big {
+                        g.1 += 1;
+                    }
+                    return PrebakePermit { gate: self, big };
+                }
+                let (ng, _) = self
+                    .cv
+                    .wait_timeout(g, std::time::Duration::from_millis(200))
+                    .unwrap_or_else(|e| e.into_inner());
+                g = ng;
+                continue;
+            }
+            if !big || g.1 < self.max_big {
+                g.0 += 1;
+                if big {
+                    g.1 += 1;
+                }
+                return PrebakePermit { gate: self, big };
+            }
+            g = self.cv.wait(g).unwrap_or_else(|e| e.into_inner());
+        }
+    }
+}
+
+struct PrebakePermit<'a> {
+    gate: &'a PrebakeGate,
+    big: bool,
+}
+
+impl Drop for PrebakePermit<'_> {
+    fn drop(&mut self) {
+        let mut g = self.gate.state.lock().unwrap_or_else(|e| e.into_inner());
+        g.0 = g.0.saturating_sub(1);
+        if self.big {
+            g.1 = g.1.saturating_sub(1);
+        }
+        self.gate.cv.notify_all();
+    }
+}
+
 pub fn precompile(paths: Vec<PathBuf>, jobs: Option<usize>, list: Option<PathBuf>) -> Result<()> {
     let cfg = victory_core::Config::load()?;
     victory_hle::modules::d3d12x::use_shader_cache(cfg.cache_subdir("shaders")?);
     let paths = crate::default_paths(paths)?;
     let threads =
         jobs.unwrap_or_else(|| std::thread::available_parallelism().map_or(4, |n| n.get()));
+    let gate = PrebakeGate::new();
+    const BIG_SHADER_BYTES: usize = 32 << 10;
     let started = std::time::Instant::now();
     let seen = Mutex::new(HashSet::new());
     let done = AtomicUsize::new(0);
@@ -433,6 +550,7 @@ pub fn precompile(paths: Vec<PathBuf>, jobs: Option<usize>, list: Option<PathBuf
                             if !lock(&seen).insert(hash) {
                                 continue;
                             }
+                            let _permit = gate.acquire(bytes.len() >= BIG_SHADER_BYTES);
                             match victory_hle::modules::d3d12x::precompile(&bytes) {
                                 Ok(_) => {
                                     let n = done.fetch_add(1, Ordering::Relaxed) + 1;

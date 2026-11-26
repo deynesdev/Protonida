@@ -90,6 +90,7 @@ mod diff_tests;
 mod intersect_tests;
 #[cfg(all(windows, any(test, feature = "host")))]
 pub mod host;
+mod loose_lds;
 mod lower;
 mod own_bits;
 #[cfg(all(test, windows))]
@@ -619,6 +620,48 @@ pub fn emit(
                 }
                 let local = lower::with_local_waves_any(|| emit_program(c, native, p, st, io, res));
                 report("local waves (APPROXIMATE, any mask)", &local);
+                if done(&local) {
+                    return local.map(|(shader, _)| shader);
+                }
+            }
+        }
+        // Last of all (`VICTORY_WAVE_LDS_LOOSE=0` turns it off): LDS read and written inside
+        // one lane-branch region, ordered between the two host waves only where the region
+        // is entered and left (`loose_lds::with`, approximate). A 32-lane host refuses
+        // the 64-lane form outright, which drops every dispatch of the program.
+        let loose_on = std::env::var_os("VICTORY_WAVE_LDS_LOOSE").is_none_or(|v| v != "0");
+        if loose_on && !strict {
+            let bases = [forms[0].1.as_ref(), forms[1].1.as_ref()];
+            for (name, f) in [("without early-outs", bases[0]), ("without skips", bases[1])] {
+                if let Some((p, st, io, res)) = f {
+                    let again = loose_lds::with(|| emit_program(c, native, p, st, io, res));
+                    report(&format!("loose LDS (APPROXIMATE), {name}"), &again);
+                    if done(&again) {
+                        return again.map(|(shader, _)| shader);
+                    }
+                }
+            }
+            let again = loose_lds::with(|| emit_program(c, native, p, st, io, res));
+            report("loose LDS (APPROXIMATE)", &again);
+            if done(&again) {
+                return again.map(|(shader, _)| shader);
+            }
+            if local_on && !exact_only {
+                for (name, f) in [("without early-outs", bases[0]), ("without skips", bases[1])] {
+                    if let Some((p, st, io, res)) = f {
+                        let local = loose_lds::with(|| {
+                            lower::with_local_waves_any(|| emit_program(c, native, p, st, io, res))
+                        });
+                        report(&format!("loose LDS + local waves (APPROXIMATE, any mask), {name}"), &local);
+                        if done(&local) {
+                            return local.map(|(shader, _)| shader);
+                        }
+                    }
+                }
+                let local = loose_lds::with(|| {
+                    lower::with_local_waves_any(|| emit_program(c, native, p, st, io, res))
+                });
+                report("loose LDS + local waves (APPROXIMATE, any mask)", &local);
                 if done(&local) {
                     return local.map(|(shader, _)| shader);
                 }

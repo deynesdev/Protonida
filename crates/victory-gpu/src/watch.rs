@@ -3423,19 +3423,48 @@ fn unguard(g: &Guards, blocks: &[usize]) {
         g.clean.remove(block);
         PUBLISHED.clear(block);
     }
-    for &block in blocks {
+    // Coalesce contiguous guarded blocks into a single VirtualProtect call
+    // (reducing wineserver IPCs on Linux/Wine) with per-block fallback if a
+    // run spans distinct VirtualAlloc regions.
+    let mut sorted = blocks.to_vec();
+    sorted.sort_unstable();
+    sorted.dedup();
+    let mut i = 0;
+    while i < sorted.len() {
+        let run_start = sorted[i];
+        let mut run_end = run_start + 1;
+        while i + 1 < sorted.len() && sorted[i + 1] == run_end {
+            i += 1;
+            run_end += 1;
+        }
         let mut old = 0;
-        // SAFETY: a block we made read-only.
-        unsafe {
-            if VirtualProtect((block * BLOCK) as *const _, BLOCK, PAGE_READWRITE, &mut old) != 0
-                && !matches!(old, PAGE_READONLY | PAGE_READWRITE)
-            {
-                // Not what we left there: the address is other memory's
-                // (code's, say), which keeps its protection.
-                VirtualProtect((block * BLOCK) as *const _, BLOCK, old, &mut old);
+        // SAFETY: guarded blocks we made read-only.
+        let batch_ok = (run_end - run_start) > 1 && unsafe {
+            VirtualProtect(
+                (run_start * BLOCK) as *const _,
+                (run_end - run_start) * BLOCK,
+                PAGE_READWRITE,
+                &mut old,
+            ) != 0
+                && matches!(old, PAGE_READONLY | PAGE_READWRITE)
+        };
+        if !batch_ok {
+            for block in run_start..run_end {
+                let mut old = 0;
+                // SAFETY: a block we made read-only.
+                unsafe {
+                    if VirtualProtect((block * BLOCK) as *const _, BLOCK, PAGE_READWRITE, &mut old) != 0
+                        && !matches!(old, PAGE_READONLY | PAGE_READWRITE)
+                    {
+                        VirtualProtect((block * BLOCK) as *const _, BLOCK, old, &mut old);
+                    }
+                }
             }
         }
-        PROTECTED.clear(block);
+        for block in run_start..run_end {
+            PROTECTED.clear(block);
+        }
+        i += 1;
     }
     #[cfg(feature = "diagnostics")]
     if !blocks.is_empty() {

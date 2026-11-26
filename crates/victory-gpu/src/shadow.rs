@@ -1606,8 +1606,9 @@ pub(crate) fn wide_each(n: usize, work: impl Fn(usize) + Send + Sync + 'static) 
     wide(jobs);
 }
 
-/// About this many bytes to a piece of work for [`wide`].
-const WIDE_JOB: usize = 1 << 20;
+/// About this many bytes to a piece of work for [`wide`] (256 KiB so typical
+/// 1.5-2 MB per-submission snapshots fan out across all workers).
+const WIDE_JOB: usize = 256 << 10;
 
 /// With [`wide_back`]: the snapshots noted while a submission is prepared
 /// (from, to, bytes), taken by [`take_snapshots`].
@@ -2224,7 +2225,7 @@ fn word_runs_put(at: usize, title: &[u8], held: &mut [u8]) -> Vec<(usize, usize)
 }
 
 /// # Safety
-/// AVX2, and two slices of one length, whole words.
+/// Caller must verify AVX2 support and equal word-aligned slice lengths.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2")]
 unsafe fn word_runs_put_avx2(title: &[u8], held: &mut [u8]) -> Vec<(usize, usize)> {
@@ -2240,7 +2241,7 @@ unsafe fn word_runs_put_avx2(title: &[u8], held: &mut [u8]) -> Vec<(usize, usize
         let mut differ = 0u64;
         for k in 0..8 {
             let at = i + 32 * k;
-            // SAFETY: inside both slices (`i + 256 <= n`).
+            // SAFETY: `i + 256 <= n` keeps all 8x32-byte loads/stores within bounds.
             unsafe {
                 let now = _mm256_loadu_si256(title.as_ptr().add(at).cast());
                 let old = _mm256_loadu_si256(held.as_ptr().add(at).cast());
@@ -2585,6 +2586,36 @@ mod merge_tests {
                 }
             }
             assert_eq!(word_runs(0x1000, &now, &was), dword_runs(0x1000, &now, &was, 0), "round {round}");
+        }
+    }
+
+    #[test]
+    fn word_runs_put_matches_word_runs_and_updates_held() {
+        let mut seed = 0x1357_9bdfu32;
+        let mut random = move || {
+            seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+            seed >> 8
+        };
+        for round in 0..200 {
+            let n = ((random() as usize % 260) + 1) * 4;
+            let was: Vec<u8> = (0..n).map(|_| random() as u8).collect();
+            let mut now = was.clone();
+            let changes = random() as usize % 24;
+            for _ in 0..changes {
+                let idx = random() as usize % n;
+                now[idx] ^= (random() as u8) | 1;
+            }
+            if round % 5 == 0 && n >= 300 {
+                for b in &mut now[16..288] {
+                    *b ^= 0x5a;
+                }
+            }
+            let want = word_runs(0x1000, &now, &was);
+            let mut merged = was;
+            let got = super::word_runs_put(0x1000, &now, &mut merged);
+            assert_eq!(got, want, "round {round}");
+            assert_eq!(merged, now, "round {round}");
+            assert!(got.iter().filter(|r| r.1 > 256).count() <= n / 260 + 1, "round {round}");
         }
     }
 
