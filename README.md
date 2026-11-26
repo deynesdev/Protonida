@@ -83,8 +83,10 @@
 ## What Makes Protonida Fast on Linux & 6 GB NVIDIA
 
 ### Linux & Wine Engineering
-- **Wine-native memory & write-watch tracking (`watch.rs`, `xmem.rs`)**: Tracks placeholder/watched reservations in-process to eliminate refused `GetWriteWatch` calls (`293 → 0`) and `VirtualQuery` hole scans (`6,705 → 14`).
+- **Wine-native memory & write-watch tracking (`watch.rs`, `xmem.rs`)**: Tracks placeholder/watched reservations in-process to eliminate refused `GetWriteWatch` calls (`293 → 0`) and `VirtualQuery` hole scans (`6,705 → 14`), plus batched contiguous `VirtualProtect(..., PAGE_READWRITE)` unguarding (`LoverCatys c0a3a1ff`).
 - **Wine hot-guard tuning (`VICTORY_GUARD_HOT=1000`, `VICTORY_GUARD_REST=50000`, `MANY = 65,536`)**: Cuts `wineserver` `VirtualProtect` IPC faults and guard refreshes without introducing stale-frame artifacts.
+- **Opt-in Linux `UFFD_FEATURE_WP_ASYNC` + `PAGEMAP_SCAN` bridge (`native/protonida_uffd.c`, `VICTORY_UFFD_WP=1`)**: Experimental `LD_PRELOAD` bridge bypassing `wineserver` IPC (kept opt-in after benchmarking showed `VirtualProtect` + `PUBLISHED` is faster on multi-GiB `MEM_MAPPED` views).
+- **Frametime percentile telemetry (`p50 / p95 / p99 / max`)**: Logged every 5 seconds in `victory_gpu::host` alongside FPS and copy/texture timings.
 - **16 MB pipeline worker stacks**: Prevents silent Wine 2 MB default thread stack overflows during shader translation.
 - **Portable static `libunwind` (`+crt-static`) + AVX2 (`x86-64-v3`) + Thin LTO (`codegen-units = 1`)**: Zero `llvm-mingw` runtime DLL dependencies (`libunwind.dll` eliminated) and maximum CPU throughput across hot copy, hash, and descriptor loops.
 
@@ -95,6 +97,8 @@
   - **Port 6 (`VICTORY_PORT_GUARD=1`)**: Shared `RwLock` write guards with per-block claims and parallel refresh planning.
   - **Port 7 (`VICTORY_PORT_JOURNAL=1`)**: 64-way sharded journal locks + submit-time heap sync.
 - **NVIDIA 1M-heap `CreateCommittedResource` storm fix**: Eliminated 19,761 unnecessary per-view buffer allocations (`OWN_MADE: 19,761 → 2`, saving ~230 ms/frame).
+- **Pooled `SHARED_SPARE` uploads & `WIDE_JOB` (256 KiB)** (`leonida c6c9da9f`): Reuses L0 `WRITE_BACK` upload buffers up to 8 MiB and cuts copy/shadow overhead (`copies` 23.7–28.9 ms → ~19.4 ms).
+- **Configurable capped-heap dynamic slots (`VICTORY_DYNAMIC_SLOTS`)**: Safely bounds dynamic slots on NVIDIA's 1M-capped view heap (default `262,144` preserves static slots `0..737,855`).
 - **`BufferSweep` span cache & parallel texture readbacks** (`XaviFortes/VIctory-RDNA`) + safe `VICTORY_INDIRECT_WINDOW=0` (`Itsbatt 340a8f8`).
 - **Wine hot-block table expansion (`MANY = 65,536`)** — prevents hot-guard table wipes during streaming.
 - **NVIDIA dynamic descriptor word-search & early slot release** (`avatarmanz` PR #237).
@@ -102,6 +106,7 @@
 
 ### Series S Graphics & Shader Correctness
 - **Native Hardware Ray Tracing (`VICTORY_BVH_BUILDER=1`)**: All 53 BVH structure builder pipelines run natively on NVIDIA RTX via `vkd3d-proton`.
+- **Wave32 loose-LDS & `ds_bpermute_b32` lowering** (`leonida 76c6f04c`): Lowers Wave64 compute shaders that read/write LDS across divergent branches to NVIDIA Wave32 cleanly, plus `CalculateLOD` coordinate fix.
 - **BC7 texture rotation fix** (`fxceless` `06702fe` / upstream #3111).
 - **RDNA 2 fused `v_mad_legacy_f32`** with FTZ & zero-factor semantics (`fxceless` `f6a09d3` / PR #1026).
 - **SDWA 16-bit sign extension** (`fxceless` `58de9bf` / upstream #3124).
@@ -125,7 +130,7 @@ Run the built-in GTK4 launcher (requires system Python 3 + PyGObject/GTK4, prein
 ./scripts/protonida-launcher.py
 ```
 
-Provides main controls for **Resolution** (720p / 1080p / 1440p / 4K), **Console Profile** (Series S Lockhart vs Series X Anaconda), **Ray Tracing (RTX)** (auto-syncing `VICTORY_BVH_BUILDER` and `settings.xml`), **MangoHud**, and a collapsible **Advanced** drawer for all `VICTORY_*`, Wine, VRAM, guard, and skip-pipeline settings (saved to `~/.config/protonida/launcher.json`).
+Provides main controls for **Resolution** (720p / 1080p / 1440p / 4K), **Console Profile** (Series S Lockhart vs Series X Anaconda), **Ray Tracing (RTX)** (auto-syncing `VICTORY_BVH_BUILDER` and `settings.xml`), **MangoHud**, a RAM-guarded **Prebake Shaders** button (`victory shaders` → `victory warm` with `VICTORY_PREBAKE_BIG_MAX=2` + `/proc/meminfo` watchdog), and a collapsible **Advanced** drawer for all `VICTORY_*`, Wine, VRAM, guard, experimental UFFD WP, and skip-pipeline settings (saved to `~/.config/protonida/launcher.json`).
 
 ### 3. CLI Launch Profiles
 
