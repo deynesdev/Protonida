@@ -177,8 +177,15 @@ pub extern "system" fn XMemVirtualAlloc(
             "XMemVirtualAlloc"
         );
     }
-    if !at.is_null() && !placeholder {
-        victory_gpu::title_memory_allocated(at as usize, size);
+    if !at.is_null() {
+        if placeholder {
+            victory_gpu::note_placeholder(at as usize, size);
+        } else {
+            if kind & MEM_WRITE_WATCH != 0 {
+                victory_gpu::note_watched(at as usize, size);
+            }
+            victory_gpu::title_memory_allocated(at as usize, size);
+        }
     }
     // (Grand Theft Auto VI asks for its 32-bit heap with kind 0x42000,
     // without the 64 KiB page bits: not `placeholder` above, though the host

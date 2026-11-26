@@ -748,9 +748,75 @@ fn kernel_written(first: usize, last: usize) -> Option<Vec<(usize, u16)>> {
 /// walking the pages between them costs less than another kernel call (a
 /// call that resets written pages costs 30-70 microseconds whatever the
 /// range).
-const AHEAD_GAP: usize = (8 << 20) / PAGE;
+const AHEAD_GAP: usize = (256 << 20) / PAGE;
 /// The most one asking covers (its answer needs 8 bytes per 4 KiB page).
 const AHEAD_MAX: usize = (1 << 30) / PAGE;
+
+static PLACEHOLDER_BLOCKS: std::sync::RwLock<Vec<(usize, usize)>> = std::sync::RwLock::new(Vec::new());
+static WATCHED_PAGES: std::sync::RwLock<Vec<(usize, usize)>> = std::sync::RwLock::new(Vec::new());
+
+/// Notes a placeholder reservation `[at, at + len)` created by `xmem` so
+/// [`placeholder`] works on Wine (where `NtQueryVirtualMemory(7)` is
+/// unimplemented) with zero syscalls.
+pub fn note_placeholder(at: usize, len: usize) {
+    if len == 0 {
+        return;
+    }
+    let first = at / BLOCK;
+    let last = at.saturating_add(len).div_ceil(BLOCK);
+    let mut v = PLACEHOLDER_BLOCKS.write().unwrap_or_else(|e| e.into_inner());
+    v.push((first, last));
+    v.sort_unstable();
+}
+
+/// Notes a `MEM_WRITE_WATCH` reservation `[at, at + len)` created by `xmem` so
+/// [`ask_ahead`] and [`writes`] never call `GetWriteWatch` on non-watched view
+/// memory or across reservation boundaries.
+pub fn note_watched(at: usize, len: usize) {
+    if len == 0 {
+        return;
+    }
+    let first = at / PAGE;
+    let last = at.saturating_add(len).div_ceil(PAGE);
+    let mut v = WATCHED_PAGES.write().unwrap_or_else(|e| e.into_inner());
+    v.push((first, last));
+    v.sort_unstable();
+}
+
+fn watched_reservation(first: usize, last: usize) -> Option<(usize, usize)> {
+    let v = WATCHED_PAGES.read().unwrap_or_else(|e| e.into_inner());
+    if v.is_empty() {
+        return Some((0, usize::MAX));
+    }
+    let idx = v.partition_point(|&(a, _)| a <= first);
+    if idx > 0 {
+        let (a, b) = v[idx - 1];
+        if a <= first && last <= b {
+            return Some((a, b));
+        }
+    }
+    None
+}
+
+fn unnote_ranges(at: usize, len: usize) {
+    let p_first = at / PAGE;
+    let p_last = if len != 0 { at.saturating_add(len).div_ceil(PAGE) } else { p_first + 1 };
+    {
+        let mut v = WATCHED_PAGES.write().unwrap_or_else(|e| e.into_inner());
+        if !v.is_empty() {
+            v.retain(|&(a, b)| if len == 0 { a != p_first } else { b <= p_first || a >= p_last });
+        }
+    }
+    let b_first = at / BLOCK;
+    let b_last = if len != 0 { at.saturating_add(len).div_ceil(BLOCK) } else { b_first + 1 };
+    {
+        let mut v = PLACEHOLDER_BLOCKS.write().unwrap_or_else(|e| e.into_inner());
+        if !v.is_empty() {
+            v.retain(|&(a, b)| if len == 0 { a != b_first } else { b <= b_first || a >= b_last });
+        }
+    }
+}
+
 /// Asks the kernel about many ranges `(start, end)` at once, before the
 /// [`writes`] of each: ranges close together are one asking, and `writes`
 /// then answers from the journal until [`ask_ahead_done`]. The world's
@@ -763,12 +829,16 @@ pub(crate) fn ask_ahead(ranges: &[(usize, usize)]) {
 
 /// [`ask_ahead`]; `held`: the caller holds everything ([`Asking::hold_all`]).
 fn ask_ahead_held(ranges: &[(usize, usize)], held: bool) {
-    let mut pieces: Vec<(usize, usize)> = ranges
+    let mut pieces: Vec<(usize, usize, usize)> = ranges
         .iter()
-        // Not view memory known by its bits: the kernel would refuse the
-        // asking (and, asked together with others, theirs).
+        // Not view memory known by its bits, and only ranges inside a known
+        // MEM_WRITE_WATCH reservation (so GetWriteWatch never fails on views
+        // or crosses reservation boundaries).
         .filter(|r| r.0 < r.1 && !published(r.0, r.1) && !refused_as_view(r.0, r.1))
-        .map(|&(start, end)| (start / PAGE, end.div_ceil(PAGE)))
+        .filter_map(|&(start, end)| {
+            let (f, l) = (start / PAGE, end.div_ceil(PAGE));
+            watched_reservation(f, l).map(|(res_base, _)| (f, l, res_base))
+        })
         .collect();
     if pieces.len() < 2 {
         return;
@@ -786,8 +856,10 @@ fn ask_ahead_held(ranges: &[(usize, usize)], held: bool) {
     while i < pieces.len() {
         let first = pieces[i].0;
         let mut last = pieces[i].1;
+        let res_base = pieces[i].2;
         let mut k = i + 1;
         while k < pieces.len()
+            && pieces[k].2 == res_base
             && pieces[k].0 <= last + AHEAD_GAP
             && last.max(pieces[k].1) - first <= AHEAD_MAX
         {
@@ -799,7 +871,8 @@ fn ask_ahead_held(ranges: &[(usize, usize)], held: bool) {
     }
     for (a, w) in spread_each(runs.len(), |r| {
         let (mut a, mut w) = (Vec::new(), Vec::new());
-        ask_run(&pieces[runs[r].clone()], &mut a, &mut w);
+        let slice: Vec<(usize, usize)> = pieces[runs[r].clone()].iter().map(|&(a, b, _)| (a, b)).collect();
+        ask_run(&slice, &mut a, &mut w);
         (a, w)
     }) {
         asked.extend(a);
@@ -1294,7 +1367,7 @@ pub(crate) fn writes(start: usize, end: usize, guarded: bool) -> Option<(u64, Ve
     if viewed {
         port6_count(P6_NOT_ASKED, 1);
     }
-    let refused = protected || viewed;
+    let refused = protected || viewed || watched_reservation(first, last).is_none();
     let pages = match if refused { None } else { kernel_written(first, last) } {
         Some(pages) => pages,
         None => {
@@ -2034,6 +2107,13 @@ fn known_holes() -> bool {
 /// to be only by mapping a view (or an allocation) in its place, which an
 /// ordinary commit cannot do.
 fn placeholder(block: usize) -> bool {
+    {
+        let v = PLACEHOLDER_BLOCKS.read().unwrap_or_else(|e| e.into_inner());
+        let idx = v.partition_point(|&(a, _)| a <= block);
+        if idx > 0 && block < v[idx - 1].1 {
+            return true;
+        }
+    }
     /// `MEMORY_REGION_INFORMATION` (ntddk).
     #[repr(C)]
     #[derive(Default)]
@@ -3657,6 +3737,7 @@ pub fn title_memory_unmapping(at: usize, len: usize) {
 /// was noted of its blocks (guarded, clean, absent) would be taken for true
 /// of the next memory at the address.
 pub fn title_memory_freed(at: usize, len: usize) {
+    unnote_ranges(at, len);
     if len != 0 {
         forget_views(at / BLOCK, at.saturating_add(len).div_ceil(BLOCK));
     } else if VIEWS.any(at / BLOCK, at / BLOCK + 1) {
