@@ -9,7 +9,7 @@ shift 2
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 XCL_HOME="${XCL_LINUX_HOME:-$HOME/.local/share/xcl-linux}"
-VICTORY_EXE="${VICTORY_EXE:-$REPO_ROOT/target/x86_64-pc-windows-gnullvm/release/victory.exe}"
+VICTORY_EXE="${BENCH_EXE:-$REPO_ROOT/target/x86_64-pc-windows-gnullvm/release/victory.exe}"
 # The game's executable as a Wine path (Z:\...): from GAME_EXE, or else the one picked in the
 # launcher (its saved config). Never hardcoded here (docs/asset-policy.md).
 if [[ -z "${GAME_EXE:-}" ]]; then
