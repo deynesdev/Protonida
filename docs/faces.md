@@ -79,3 +79,15 @@ deciding factor (later bad runs of the old binary also reached 12–15 fps).
   that lost character geometry on AMD. Not in this tree. [src]
 - cool_fox README: "`VICTORY_THIN=1` … NVIDIA: head skin may not draw" (THIN=0 alone did
   not help here). [src]
+- The game has a GPU morphable head model, `ped_morphable_model_cs` (`CS_MorphableInit`
+  9cfa9aa6a5e60f26, `CS_MorphableShapeSolve` fe3678eae1ca9a1a, `CS_MorphableReconstructNormals`
+  7ae4af7c4309b836). In no run (the good one included) is any of the three translated or bound,
+  while every run logs 29 pipelines the title "goes without" because their creation method,
+  device slot `0x1c8` (the title's precompiled-pipeline cache), is not implemented. If the
+  morphable heads are among those pipelines, the high-detail head geometry is never built by
+  the GPU here; the good run would then be a fallback winning a race. Next: find which
+  pipelines the 29 `0x1c8` calls describe (`first_points_at`, `description` in the warning),
+  and whether the title retries them through a creation method this layer implements. [obs,inf]
+- flamingo's conclusion "the decoding is on the card and the card copy is the one to keep"
+  [src]: a GPU-only result like that is lost if anything refreshes the GPU copy from title
+  memory afterwards; worth testing with refreshes of those buffers suppressed. [inf]
