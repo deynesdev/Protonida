@@ -17,17 +17,23 @@
 
 ## Overview
 
-**Protonida** is a standalone, Linux-first fork of the [VIctory](https://github.com/Marvisak/VIctory) Xbox Series X|S compatibility layer, engineered to deliver **Xbox Series S visual fidelity** — including **native hardware ray-traced global illumination (`VICTORY_BVH_BUILDER=1`)** — and playable **20–30 FPS** performance on **Linux with 6 GB VRAM NVIDIA laptop GPUs** (tested on an RTX 4050 Laptop + Ryzen 5 7535HS under Fedora 44, Wine Staging, and `vkd3d-proton 3.2.0`).
+**Protonida** is a standalone, Linux-first fork of the [VIctory](https://github.com/Marvisak/VIctory) Xbox Series X|S compatibility layer. Its goal is **Xbox Series S picture quality at a steady 30 FPS** on **Linux with 6 GB VRAM NVIDIA laptop GPUs** (developed on an RTX 4050 Laptop + Ryzen 5 7535HS under Fedora 44, Wine Staging and `vkd3d-proton`). It is not there yet: see [Current status](#current-status).
 
 > **Disclaimer:** This repository contains **no game files, binaries, keys, or assets**. You must supply your own legally obtained files. Protonida is not affiliated with or endorsed by any game developer, publisher, or console manufacturer.
 
 ---
 
-## Benchmarks
+## Current status
 
-**Test machine:** Fedora 44 (Linux `7.2.15`, `/dev/ntsync`) • AMD Ryzen 5 7535HS (6c/12t) • 30 GB RAM • NVIDIA RTX 4050 Laptop (6 GB VRAM, driver `580.196.07`) • Wine Staging + patched RB-tree `wineserver` • `vkd3d-proton 3.2.0` • 720p Series S profile.
+**Test machine:** Fedora 44 (Linux `7.2.15`, `/dev/ntsync`) • AMD Ryzen 5 7535HS (6c/12t) • 30 GB RAM • NVIDIA RTX 4050 Laptop (6 GB VRAM, driver `580.196.07`) • Wine 11.21 Staging + patched RB-tree `wineserver` • `vkd3d-proton` built from master (`v3.1-97-g71cae09`, reports itself as 3.2.0) • DXVK 3.1.1 • 720p Series S profile.
 
-### Performance Progression
+**Measured 2026-11-27** (`scripts/bench-phase.sh` defaults, the game's opening scene in the prison, 215 s runs): **4.5–5.0 FPS**, frame time p50 ≈ 200 ms, p95 260–290 ms, p99 260–320 ms. Frames are CPU-bound in `preparing` and `copying back`.
+
+**Character faces and skin do not render** in most runs: the close-up characters show eyes, teeth and hair, but the head mesh itself is missing (distant characters are fine). It is a race: one run in about six draws the faces. What is known and ruled out is in [docs/faces.md](docs/faces.md).
+
+### Earlier numbers (not reproduced)
+
+The table below was written by earlier work on this tree. It has **not been reproduced**: the same machine measures 4.5–5.0 FPS in the opening scene today (above). Treat it as a record of claims, not as current performance.
 
 | Milestone | 3D World (~526–594 draws) | Mid City (~1,250–1,911 draws) | Heavy City (~2,550–2,700 draws) | GPU Wait / Stall\* |
 | :--- | :---: | :---: | :---: | :---: |
@@ -45,12 +51,13 @@
 ## Progress, Stability & Known Issues
 
 - **Story & in-game progression tested:** Full boot → menus → opening cinematic & live 3D Vice City night/street scenes (500–2,800+ draws/frame) verified with both **Series S Hardware RTX (`VICTORY_BVH_BUILDER=1`, all 53 BVH builder pipelines active)** and **Screen-Space SH GI (`VICTORY_BVH_BUILDER=0`)**. Extended story mission / free-roam playtesting and an uninterrupted MangoHud video capture are next in line.
-- **Stability:** Stable across repeated automated 90–140 s world/city runs on 6 GB VRAM once shaders are cached (`0` DXGI device removals, `0` VRAM OOMs). Long-session (30+ min) stability testing is still in progress. First-time shader translation + `vkd3d-proton` pipeline compilation takes several minutes and causes temporary hitching until `vkd3d-proton.victory.exe.cache` warms up.
+- **Stability:** Stable across repeated automated 90–140 s world/city runs on 6 GB VRAM once shaders are cached (`0` DXGI device removals, `0` VRAM OOMs). Long-session (30+ min) stability testing is still in progress. System memory grows during a run (about 12 GB in the game's own memory after 4 minutes on 2026-11-27, more with shared mappings counted), so keep other memory use low; a possible leak is being looked into. First-time shader translation + `vkd3d-proton` pipeline compilation takes several minutes and causes temporary hitching until `vkd3d-proton.victory.exe.cache` warms up.
 - **Input & Audio:** GameInput keyboard and XInput controller input work (including scripted `VICTORY_KEYS` in release builds). Audio runs through Wine's standard audio backend.
 - **Wine `wineserver` note:** Benchmarks above use a locally patched RB-tree view-indexed + `/dev/ntsync` `wineserver` to cut `VirtualProtect`/`GetWriteWatch` IPC overhead. On unpatched stock Wine Staging, heavy-city CPU `copies` time is higher (~3–5 ms/frame slower depending on kernel/Wine version).
 - **Known issues & visual trade-offs:**
+  - **Faces and skin of close-up characters are missing in most runs** (head mesh not drawn; race, about one run in six is correct). See [docs/faces.md](docs/faces.md).
   - Heavy 2,500–2,800+ draw city scenes remain CPU `preparing`-bound on Linux/Wine (`copies` ~11–16 ms/frame from `VirtualProtect`/`GetWriteWatch` IPCs + per-draw CBV copies).
-  - NVIDIA's 1,000,000-descriptor shader-visible heap cap prevents Renderer Port #5 (`VICTORY_PORT_CBV=1`) table `raw_twins`, so table CBVs are still copied into dynamic slots per draw (mitigated by `VICTORY_TABLE_STAGES`).
+  - NVIDIA's 1,000,000-descriptor shader-visible heap cap prevents Renderer Port #5 (`VICTORY_PORT_CBV=1`) table `raw_twins`, so table CBVs are still copied into dynamic slots per draw.
   - `rtDynamicShadows="false"` + `ssroSampleCount="1"` in `settings.xml` trade dynamic ray-traced shadows for higher FPS while keeping full hardware RTGI and RT reflections.
   - Distant octahedral billboard impostors render as flat panels and are skipped via `VICTORY_SKIP_PIPELINES` (removing broken flat distant panels at the cost of some distant billboard LODs).
   - `VICTORY_OUTPUT=1280x720` requires `VICTORY_UPSCALER=6` on Series S to avoid a FidelityFX jitter divide-by-zero.
@@ -122,7 +129,9 @@ Provides main controls for **Resolution** (720p / 1080p / 1440p / 4K), **Console
 
 ### 3. CLI Launch Profiles
 
-#### Series S Hardware RTX (Default — 17.2–27.0 FPS, native RTGI & reflections)
+For measurements use `scripts/bench-phase.sh <profile> <seconds> [KEY=VAL ...]` (results in `/tmp/protonida-bench/<profile>/`). It takes the game from `GAME_EXE` (a Linux or Wine path) or from the launcher's saved choice, and the build from `BENCH_EXE` if set.
+
+#### Series S Hardware RTX (native RTGI & reflections)
 ```bash
 export WINEDLLOVERRIDES="d3d12,d3d12core,d3d11,dxgi,d3dcompiler_47=n;mscoree,mshtml="
 export __GL_SHADER_DISK_CACHE_SIZE=4294967296
@@ -131,7 +140,7 @@ export VICTORY_OUTPUT=1280x720
 export VICTORY_UPSCALER=6
 export VICTORY_PORT_CONSTANTS=1 VICTORY_PORT_DESCRIPTORS=1 VICTORY_PORT_GUARD=1 VICTORY_PORT_JOURNAL=1
 export VICTORY_PORT_DESCRIPTORS_EVERY=32 VICTORY_PORT_DESCRIPTORS_CHECK=2
-export VICTORY_LATE_WAIT=3 VICTORY_LATE_WAIT_LISTS=1024 VICTORY_MERGE_RUNS=8192 VICTORY_ASYNC_SUBMIT=1
+export VICTORY_LATE_WAIT=3 VICTORY_LATE_WAIT_LISTS=1024 VICTORY_ASYNC_SUBMIT=1
 export VICTORY_INPLACE=1 VICTORY_INPLACE_MB=4096
 export VICTORY_GUARD_REST=50000 VICTORY_GUARD_HOT=1000
 export VICTORY_INDIRECT_WINDOW=0 VICTORY_SHOW_AFTER=0
@@ -149,7 +158,7 @@ wine target/x86_64-pc-windows-gnullvm/release/victory.exe run \
   --execute 'Z:\path\to\game_scarlett_master.exe'
 ```
 
-#### Max-FPS Series S (20–29.3 FPS, Screen-Space SH GI)
+#### Series S without ray tracing (Screen-Space SH GI)
 Swap the last three variables:
 ```bash
 export VICTORY_BVH_BUILDER=0
