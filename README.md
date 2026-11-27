@@ -37,6 +37,16 @@
     </td>
   </tr>
   <tr>
+    <td align="center">
+      <img src="docs/screenshots/prison-yard-sunset.png" alt="Prison Yard Sunset - On-Demand Texture Streaming (1280 MB)" width="100%" /><br/>
+      <sub><b>Prison Yard Sunset (`LEVELS_ON_DEMAND=1`, `1280 MB`)</b> — full uniform &amp; yard textures (`1,877 MB` streamed)</sub>
+    </td>
+    <td align="center">
+      <img src="docs/screenshots/prison-volumetric-sunset.png" alt="Prison Yard Volumetric Bloom" width="100%" /><br/>
+      <sub><b>Prison Yard Volumetric Sunset</b> — golden-hour bloom &amp; hair rim lighting (`4,179 draws/frame`)</sub>
+    </td>
+  </tr>
+  <tr>
     <td colspan="2" align="center">
       <img src="docs/screenshots/vice-city-night.png" alt="Vice City Night Street" width="75%" /><br/>
       <sub><b>Vice City at Night</b> — clean 720p Series S output on Linux + Wine + <code>vkd3d-proton 3.2.0</code></sub>
@@ -105,6 +115,7 @@
 - **Optional RT pass skipping (`VICTORY_SKIP_RT=1`)**: Skips 15 unused ray-tracing compute passes and their VRAM allocations when running in non-RT mode.
 
 ### Series S Graphics & Shader Correctness
+- **On-demand mip streaming (`VICTORY_LEVELS_ON_DEMAND=1`, `VICTORY_TEXTURE_BUDGET_MB=1280`, `VICTORY_TEXTURE_NO_WAIT=0`)**: Prevents saturating a 512 MB up-front mip budget and avoids skipping unfilled remapped pages, increasing streamed textures `4.5x` (`417 MB → 1,877 MB` / `9,414` textures in the opening sequence, restoring crisp character uniform and environment textures).
 - **GPU compute texture detiling (`VICTORY_GPU_DETILE=1`, `fxceless 3461f52f`), `TilingCache` readback reuse (`TaynanGT f0019f2e`), and zero-alloc `relay_merge` (`fxceless` PR `#1427`)**: Opt-in GPU compute detiling offloads texture detiling completely (`0.00 ms` CPU detile, `0` refused dispatches on RTX 4050 + `vkd3d-proton 3.2.0`) while preserving the `StagingPiece` pool when off (`default = 0`).
 - **Full 16-bit `half_views` translator & cache stack (`LoverCatys 4b5856a1`, `shader_cache::FORMAT = 3`)**: Adds `emit/halves.rs`, `HostShader::half_views`, `descriptor::host::half_view`/`half_inexact`, and `TablePlan::half` alongside `ForceEarlyDepthStencil` (`VICTORY_EARLY_DEPTH`), raw 16-bit integer `d16` image loads (`VICTORY_D16_BITS`), `VICTORY_SPILL_STRICT` + `s_bfm_b32` literal folding, `v_fmac_f32` VOP3 bit-2 accumulator modifiers, and `wave.rs` unmatched `s_*saveexec` scanning.
 - **Native Hardware Ray Tracing (`VICTORY_BVH_BUILDER=1`) + RT indoor ambient band (`VICTORY_AMBIENT_RT`)** (`avatarmanz 77137b98`): All 53 BVH structure builder pipelines run natively on NVIDIA RTX via `vkd3d-proton`, while `VICTORY_AMBIENT_RT=0.35,2.5,0.8` prevents crushed black indoor rooms without washing out RTGI detail.
