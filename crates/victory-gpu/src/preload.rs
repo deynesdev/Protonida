@@ -1,6 +1,6 @@
 //! Scene preload gate and monotonic title-clock freeze during texture/PSO prewarming.
 //!
-//! When GTA VI leaves its loading screen and enters the prologue (or switches
+//! When the game leaves its loading screen and enters the prologue (or switches
 //! scenes with a large streaming burst), hundreds/thousands of textures and
 //! newly-bound pipelines can still be streaming in from HDD or compiling in
 //! the background. Without a preload gate, the opening frames render with

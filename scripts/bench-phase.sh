@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Reproducible phase benchmark harness for Protonida (GTA VI on Linux/Wine/vkd3d-proton).
+# Reproducible phase benchmark harness for Protonida (the game on Linux/Wine/vkd3d-proton).
 # Usage: scripts/bench-phase.sh <profile_name> <duration_sec> [extra_env_key=val ...]
 set -euo pipefail
 
