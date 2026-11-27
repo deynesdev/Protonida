@@ -77,6 +77,22 @@ impl Pending {
 
     fn make(&self) {
         self.made.get_or_init(|| {
+            // Water tiled-light programs (5dc3b25986622949, 6f225b641c5b0708) run in
+            // wave-wide form on 32-lane NVIDIA hosts and leave dark blocks on open water
+            // at ~15 ms GPU/frame (victorynv 35c15608; VICTORY_WATER_LIGHT=1 runs them).
+            const WATER_LIGHT: [&str; 2] = ["5dc3b25986622949", "6f225b641c5b0708"];
+            static WANT_WATER_LIGHT: OnceLock<bool> = OnceLock::new();
+            let skip_water_light = !*WANT_WATER_LIGHT
+                .get_or_init(|| std::env::var_os("VICTORY_WATER_LIGHT").is_some_and(|v| v == "1"))
+                && victory_shader::emit::host_settings()[0] == 32
+                && self.shaders.iter().any(|s| WATER_LIGHT.contains(&s.hash.as_str()));
+            if skip_water_light {
+                tracing::info!(
+                    shaders = ?self.shaders.iter().map(|s| &s.hash).collect::<Vec<_>>(),
+                    "water tiled light left out on 32-lane host (dark blocks; VICTORY_WATER_LIGHT=1 runs it)"
+                );
+                return None;
+            }
             let _building = crate::timeline::span("pipeline: build a host pipeline");
             let began = Instant::now();
             let made = HostPipeline::new(&self.shaders, self.graphics.as_deref());

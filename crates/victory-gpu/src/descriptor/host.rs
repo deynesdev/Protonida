@@ -124,7 +124,11 @@ impl Made {
     }
 }
 
+/// Unique identity per host heap so dynamic slots never free into a reused heap address (`fxceless #1324`).
+static NEXT_HEAP_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
 pub(crate) struct HostHeap {
+    id: u64,
     pub(crate) buffer_sweep: Mutex<crate::draw::BufferSweep>,
     pub(crate) buffer_frame: std::sync::atomic::AtomicU64,
     pub(crate) heap: ID3D12DescriptorHeap,
@@ -1847,6 +1851,7 @@ impl HostHeap {
             .flatten();
         let queued = std::sync::Arc::new(Queued::new(if sampler { 0 } else { count }));
         let h = HostHeap {
+            id: NEXT_HEAP_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             buffer_sweep: Mutex::default(),
             buffer_frame: std::sync::atomic::AtomicU64::new(u64::MAX),
             heap,
@@ -2914,7 +2919,16 @@ impl HostHeap {
     /// returned).
     ///
     /// [`dynamic`]: HostHeap::dynamic
-    pub(crate) fn release(&self, first: u32, n: u32) {
+    /// Unique identity of this host heap (`NEXT_HEAP_ID`).
+    pub(crate) fn id(&self) -> u64 {
+        self.id
+    }
+
+    /// Gives back the dynamic slots `first..first + n` if `id` matches this heap.
+    pub(crate) fn release(&self, id: u64, first: u32, n: u32) {
+        if self.id != id {
+            return;
+        }
         let Some(at) = first.checked_sub(self.count) else {
             return;
         };
