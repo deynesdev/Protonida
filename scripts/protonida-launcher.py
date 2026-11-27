@@ -51,7 +51,7 @@ RTX_MODES = [
 
 def default_config() -> dict:
     return {
-        "game_exe": "",
+        "game_exe": os.environ.get("PROTONIDA_GAME_EXE", ""),
         "victory_exe": str(DEFAULT_VICTORY_EXE),
         "wine_bin": shutil.which("wine") or "/usr/bin/wine",
         "wineprefix": str(DEFAULT_WINEPREFIX),
