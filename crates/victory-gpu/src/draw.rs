@@ -2992,6 +2992,25 @@ impl State {
             once!("a dispatch with a graphics pipeline");
             return;
         }
+        // Thin slow 1x1x1 single-group compute pass (~10.9 ms GPU) to every Nth frame
+        // (`VICTORY_THIN_SLOW_COMPUTE`, default 4; 0 or 1 runs every frame — kitty-core 7124a8f / lovercatys d843417d).
+        const SLOW_SINGLE_GROUP_COMPUTE: &str = "02384a60fda6f2d0";
+        static THIN_SLOW: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+        let thin_every = *THIN_SLOW.get_or_init(|| {
+            std::env::var("VICTORY_THIN_SLOW_COMPUTE")
+                .ok()
+                .and_then(|v| v.trim().parse().ok())
+                .unwrap_or(4)
+        });
+        if thin_every > 1
+            && x == 1
+            && y == 1
+            && z == 1
+            && p.stages.iter().any(|s| s.shader.hash.as_str() == SLOW_SINGLE_GROUP_COMPUTE)
+            && !crate::frame::current().is_multiple_of(thin_every)
+        {
+            return;
+        }
         if !self.bind(list, p, true) {
             DROPPED.fetch_add(1, Ordering::Relaxed);
             // A stage of the structure builder that cannot be bound is a

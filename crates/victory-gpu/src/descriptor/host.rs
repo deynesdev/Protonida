@@ -3793,12 +3793,18 @@ pub(crate) fn buffer_range(view: &View) -> Option<(u64, u64)> {
 /// walks the structure from there itself).
 pub(crate) fn view_address(view: &View) -> Option<u64> {
     const STRUCTURE: u32 = D3D12_SRV_DIMENSION_RAYTRACING_ACCELERATION_STRUCTURE.0 as u32;
-    match view {
-        View::Shader(_, Some(desc)) if desc[1] == STRUCTURE => {
-            Some(u64::from(desc[4]) | u64::from(desc[5]) << 32)
-        }
-        _ => buffer_range(view).map(|range| range.0),
+    let words = match view {
+        View::Shader(_, Some(desc)) => Some(&desc[..]),
+        View::Placed(false, _, desc) => Some(&desc[..10]),
+        _ => None,
+    };
+    if let Some(desc) = words
+        && desc[1] == STRUCTURE
+    {
+        let at = u64::from(desc[4]) | u64::from(desc[5]) << 32;
+        return (at != 0).then_some(at);
     }
+    buffer_range(view).map(|range| range.0)
 }
 
 /// Enters the title address of `view` (0 for none, or a view that is no

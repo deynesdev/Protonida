@@ -86,6 +86,7 @@ const RT_SKIP_PATTERNS: &[&[u8]] = &[
     b"CS_ScreenProbes_EvaluateRayRequests",
     b"CS_SortRayTiles",
     b"CS_Primary_RegisterAllocationRequests",
+    b"CS_GatherRaymarchedLocalLightsClassified",
     b"TraceRays_BVH",
     b"RTShadowTrace",
     b"RTDistantShadowTrace",
