@@ -23,39 +23,6 @@
 
 ---
 
-## Live Linux Captures (RTX 4050 Laptop 6 GB)
-
-<table>
-  <tr>
-    <td align="center">
-      <img src="docs/screenshots/rtx-lucia-jason.png" alt="Hardware RTX - Character Lighting & Subsurface Scattering" width="100%" /><br/>
-      <sub><b>Series S Hardware RTX (`BVH_BUILDER=1`)</b> — native RTGI, hair rim lighting, skin SSS</sub>
-    </td>
-    <td align="center">
-      <img src="docs/screenshots/rtx-red-bounce.png" alt="Hardware RTX - Red Bounce & Reflections" width="100%" /><br/>
-      <sub><b>Series S Hardware RTX (`BVH_BUILDER=1`)</b> — red bounce lighting & specular sheen</sub>
-    </td>
-  </tr>
-  <tr>
-    <td align="center">
-      <img src="docs/screenshots/prison-yard-sunset.png" alt="Prison Yard Sunset - On-Demand Texture Streaming (1280 MB)" width="100%" /><br/>
-      <sub><b>Prison Yard Sunset (`LEVELS_ON_DEMAND=1`, `1280 MB`)</b> — full uniform &amp; yard textures (`1,877 MB` streamed)</sub>
-    </td>
-    <td align="center">
-      <img src="docs/screenshots/prison-volumetric-sunset.png" alt="Prison Yard Volumetric Bloom" width="100%" /><br/>
-      <sub><b>Prison Yard Volumetric Sunset</b> — golden-hour bloom &amp; hair rim lighting (`4,179 draws/frame`)</sub>
-    </td>
-  </tr>
-  <tr>
-    <td colspan="2" align="center">
-      <img src="docs/screenshots/vice-city-night.png" alt="Vice City Night Street" width="75%" /><br/>
-      <sub><b>Vice City at Night</b> — clean 720p Series S output on Linux + Wine + <code>vkd3d-proton 3.2.0</code></sub>
-    </td>
-  </tr>
-</table>
-
----
-
 ## Benchmarks
 
 **Test machine:** Fedora 44 (Linux `7.2.15`, `/dev/ntsync`) • AMD Ryzen 5 7535HS (6c/12t) • 30 GB RAM • NVIDIA RTX 4050 Laptop (6 GB VRAM, driver `580.196.07`) • Wine Staging + patched RB-tree `wineserver` • `vkd3d-proton 3.2.0` • 720p Series S profile.
