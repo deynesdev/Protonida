@@ -23,7 +23,6 @@ DEFAULT_VICTORY_EXE = REPO_ROOT / "target" / "x86_64-pc-windows-gnullvm" / "rele
 DEFAULT_WINESERVER = Path.home() / ".local" / "share" / "xcl-linux" / "wineserver-runtime" / "server" / "wineserver"
 DEFAULT_WINEPREFIX = Path.home() / ".local" / "share" / "xcl-linux" / "prefix"
 DEFAULT_XCL_LINUX_HOME = Path.home() / ".local" / "share" / "xcl-linux"
-DEFAULT_GAME_EXE = Path("/mnt/NVMe/GTAXBOX/GTA6.Xbox.v1.0.2.1-CYBERLEEK/game_scarlett_master.exe")
 DEFAULT_SKIP_PIPELINES = "7115e46a79c78f98,59b1ba494f18c894,b8ca32a6899b87fb,659fe9cae59dbd88"
 
 LOG_LEVELS = [
@@ -52,7 +51,7 @@ RTX_MODES = [
 
 def default_config() -> dict:
     return {
-        "game_exe": str(DEFAULT_GAME_EXE) if DEFAULT_GAME_EXE.exists() else "",
+        "game_exe": "",
         "victory_exe": str(DEFAULT_VICTORY_EXE),
         "wine_bin": shutil.which("wine") or "/usr/bin/wine",
         "wineprefix": str(DEFAULT_WINEPREFIX),

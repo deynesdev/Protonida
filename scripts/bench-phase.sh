@@ -10,7 +10,16 @@ shift 2
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 XCL_HOME="${XCL_LINUX_HOME:-$HOME/.local/share/xcl-linux}"
 VICTORY_EXE="$REPO_ROOT/target/x86_64-pc-windows-gnullvm/release/victory.exe"
-GAME_EXE="${GAME_EXE:-Z:\\mnt\\NVMe\\GTAXBOX\\GTA6.Xbox.v1.0.2.1-CYBERLEEK\\game_scarlett_master.exe}"
+# The game's executable as a Wine path (Z:\...): from GAME_EXE, or else the one picked in the
+# launcher (its saved config). Never hardcoded here (docs/asset-policy.md).
+if [[ -z "${GAME_EXE:-}" ]]; then
+  LAUNCHER_CFG="${XDG_CONFIG_HOME:-$HOME/.config}/protonida/launcher.json"
+  GAME_EXE="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("game_exe", ""))' "$LAUNCHER_CFG" 2>/dev/null || true)"
+  if [[ -n "$GAME_EXE" && "$GAME_EXE" != [A-Za-z]:\\* ]]; then
+    GAME_EXE="Z:${GAME_EXE//\//\\}"
+  fi
+fi
+GAME_EXE="${GAME_EXE:?set GAME_EXE to the game executable (a Wine path such as Z:\\games\\title\\game.exe), or pick it once in scripts/protonida-launcher.py}"
 OUT_DIR="/tmp/protonida-bench/${PROFILE}"
 mkdir -p "$OUT_DIR"
 
@@ -38,7 +47,7 @@ export VICTORY_LOG=info
 export RUST_LOG=info
 export DXVK_FILTER_DEVICE_NAME=NVIDIA
 export VKD3D_FILTER_DEVICE_NAME=NVIDIA
-export VICTORY_GAME_DIR='Z:\mnt\NVMe\GTAXBOX\GTA6.Xbox.v1.0.2.1-CYBERLEEK'
+export VICTORY_GAME_DIR="${VICTORY_GAME_DIR:-${GAME_EXE%\\*}}"
 export VICTORY_OUTPUT=1280x720
 export VICTORY_UPSCALER=6
 export VICTORY_PORT_CONSTANTS=1
