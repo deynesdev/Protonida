@@ -135,11 +135,14 @@
 ## Quick Start (Linux)
 
 ### 1. Cross-compile from Linux
-Requires Rust with the `x86_64-pc-windows-gnullvm` target and `clang`/`lld`:
+Requires Rust with the `x86_64-pc-windows-gnullvm` target and an [llvm-mingw](https://github.com/mstorsjo/llvm-mingw) toolchain. Rust links this target with `x86_64-w64-mingw32-clang`, so that binary must be on `PATH` (Fedora's `clang`/`lld` packages do not provide it). The xcl-linux setup already ships one under `$XCL_LINUX_HOME/llvm-mingw`:
 
 ```bash
+export PATH="${XCL_LINUX_HOME:-$HOME/.local/share/xcl-linux}/llvm-mingw/bin:$PATH"
 cargo build --release --target x86_64-pc-windows-gnullvm -p victory
 ```
+
+`error: linker 'x86_64-w64-mingw32-clang' not found` means that directory is not on `PATH`. Alternatively, point Cargo at the linker directly with `CARGO_TARGET_X86_64_PC_WINDOWS_GNULLVM_LINKER=/path/to/llvm-mingw/bin/x86_64-w64-mingw32-clang`.
 
 ### 2. GUI Launcher (Recommended)
 Run the built-in GTK4 launcher (requires system Python 3 + PyGObject/GTK4, preinstalled on Fedora/GNOME):
