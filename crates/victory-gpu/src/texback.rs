@@ -202,7 +202,8 @@ pub(crate) fn land(back: &Back) {
     static COPIED: AtomicU64 = AtomicU64::new(0);
     static STALE: AtomicU64 = AtomicU64::new(0);
     thread_local! {
-        static SCRATCH: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
+        static SCRATCH: std::cell::RefCell<(Vec<u8>, victory_formats::texture::TilingCache)> =
+            std::cell::RefCell::new((Vec::new(), victory_formats::texture::TilingCache::default()));
     }
     if !back.ticket.valid.load(Ordering::Acquire) {
         let skipped = STALE.fetch_add(1, Ordering::Relaxed) + 1;
@@ -214,8 +215,11 @@ pub(crate) fn land(back: &Back) {
     let _mapping = crate::watch::title_memory_reading();
     let (at, end) = back.range();
     let size = end - at;
-    SCRATCH.with_borrow_mut(|tiled| {
-        tiled.resize(size, 0);
+    SCRATCH.with_borrow_mut(|(tiled, tiling)| {
+        if tiled.len() < size {
+            tiled.reserve_exact(size - tiled.len());
+            tiled.resize(size, 0);
+        }
         // Keep title bytes the subresources do not cover.
         if !crate::host::read_into(at as *const u8, &mut tiled[..size]) {
             return;
@@ -234,7 +238,8 @@ pub(crate) fn land(back: &Back) {
             let len = pitch * rows as usize * f.Depth as usize;
             // SAFETY: the subresource's part of the mapped buffer.
             let linear = unsafe { std::slice::from_raw_parts(data.cast::<u8>().add(footprint.Offset as usize), len) };
-            if let Err(e) = back.layout.tile(&mut tiled[..size], mip, slice, linear, pitch, pitch * rows as usize) {
+            let pitches = (pitch, pitch * rows as usize);
+            if let Err(e) = tiling.tile(&back.layout, &mut tiled[..size], (mip, slice), linear, pitches) {
                 static ONCE: std::sync::Once = std::sync::Once::new();
                 ONCE.call_once(|| tracing::warn!(?e, mip, slice, "a texture copied back could not be tiled"));
                 // SAFETY: mapped above.

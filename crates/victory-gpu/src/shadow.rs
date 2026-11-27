@@ -1029,6 +1029,17 @@ fn merge_piece(now: &[u8], held: &mut [u8], title: &mut [u8]) -> bool {
 fn outside(from: usize, to: usize, mut skip: Vec<(usize, usize)>) -> Vec<(usize, usize)> {
     skip.sort_unstable();
     let mut out = Vec::new();
+    for_outside(from, to, skip, |a, b| out.push((a, b)));
+    out
+}
+
+/// Visits the parts of `[from, to)` outside ranges sorted by their start.
+fn for_outside(
+    from: usize,
+    to: usize,
+    skip: impl IntoIterator<Item = (usize, usize)>,
+    mut part: impl FnMut(usize, usize),
+) {
     let mut at = from;
     for (a, b) in skip {
         if b <= at {
@@ -1038,14 +1049,13 @@ fn outside(from: usize, to: usize, mut skip: Vec<(usize, usize)>) -> Vec<(usize,
             break;
         }
         if a > at {
-            out.push((at, a));
+            part(at, a);
         }
         at = at.max(b);
     }
     if at < to {
-        out.push((at, to));
+        part(at, to);
     }
-    out
 }
 
 #[cfg(test)]
@@ -4711,13 +4721,18 @@ impl Shadow {
         title.resize(n, 0);
         let mapped = crate::host::read_into((start + at) as *const u8, title);
         let was = title.clone();
-        let mut changed = false;
-        for (a, b) in outside(at, at + n, skip) {
-            let (a, b) = (a - at, b - at);
-            // Title memory that is not mapped: the CPU's side keeps what
-            // the card wrote, as before; `title` is scratch then.
-            changed |= merge_piece(&gpu[a..b], &mut held[a..b], &mut title[a..b]);
-        }
+        let changed = if skip.is_empty() {
+            merge_piece(gpu, held, &mut title[..])
+        } else {
+            let mut changed = false;
+            for (a, b) in outside(at, at + n, skip) {
+                let (a, b) = (a - at, b - at);
+                // Title memory that is not mapped: the CPU's side keeps what
+                // the card wrote, as before; `title` is scratch then.
+                changed |= merge_piece(&gpu[a..b], &mut held[a..b], &mut title[a..b]);
+            }
+            changed
+        };
         if !mapped || !changed {
             return 0;
         }
@@ -4787,14 +4802,19 @@ impl Shadow {
     /// # Safety
     /// The third of each piece is the address of its bytes, which stay as
     /// they are during the call.
-    pub(crate) unsafe fn land_card(&self, pieces: &[(usize, usize, usize)], fetched_after: u64, notes: &mut crate::land::Notes) -> u64 {
+    pub(crate) unsafe fn land_card(
+        &self,
+        pieces: impl Iterator<Item = (usize, usize, usize)> + Clone,
+        fetched_after: u64,
+        notes: &mut crate::land::Notes,
+    ) -> u64 {
         let Some(card) = &self.card else {
             return 0;
         };
         let waiting = std::time::Instant::now();
         let _merging = self.merging.read().unwrap_or_else(|e| e.into_inner());
         crate::land::spent(crate::land::stat::LOCK, waiting);
-        let (from, to) = pieces.iter().fold((usize::MAX, 0), |(a, b), p| (a.min(p.0), b.max(p.1)));
+        let (from, to) = pieces.clone().fold((usize::MAX, 0), |(a, b), p| (a.min(p.0), b.max(p.1)));
         let skip: Vec<(usize, usize)> = {
             let dirty = card.dirty.lock().unwrap_or_else(|e| e.into_inner());
             let sent = card.sent.lock().unwrap_or_else(|e| e.into_inner());
@@ -4802,20 +4822,31 @@ impl Shadow {
             sent.near(fetched_after, from, to, &mut skip);
             skip
         };
+        // Both sources of protected bytes can overlap. Join them once so
+        // each piece can find its first overlapping range by end address.
+        let skip = if skip.len() > 1 { joined(skip) } else { skip };
+        let mut partial = Vec::new();
         let mut put = 0;
-        for &(lo, hi, now) in pieces {
+        for (lo, hi, now) in pieces {
             if lo >= hi || hi > self.len as usize {
                 continue;
             }
-            let near: Vec<(usize, usize)> = skip.iter().copied().filter(|&(a, b)| a < hi && b > lo).collect();
-            let parts: Vec<(usize, usize)> = outside(lo, hi, near).into_iter().map(|(a, b)| (a - lo, b - lo)).collect();
+            let near = &skip[skip.partition_point(|&(_, end)| end <= lo)..];
+            let whole = [(0, hi - lo)];
+            let parts: &[(usize, usize)] = if near.first().is_none_or(|&(start, _)| start >= hi) {
+                &whole
+            } else {
+                partial.clear();
+                for_outside(lo, hi, near.iter().copied(), |a, b| partial.push((a - lo, b - lo)));
+                &partial
+            };
             // SAFETY: inside the mapping (checked above), in a range
             // declared and not done with, which no refresh writes; the
             // title's bytes are kept out by the lock; the caller's.
             // Where title memory is not mapped the CPU's side keeps what
             // the card wrote, as before.
             let merged =
-                unsafe { crate::land::piece(self.start as usize + lo, now as *const u8, self.data.add(lo), &parts, true, notes, self) };
+                unsafe { crate::land::piece(self.start as usize + lo, now as *const u8, self.data.add(lo), parts, true, notes, self) };
             self.walls_merged(hi - lo, merged as usize);
             if merged > 0 {
                 self.note_landing(lo, hi);
@@ -4979,11 +5010,10 @@ mod land_tests {
                 for &(lo, hi) in &pieces {
                     one.card_merge_relay(lo, &now[lo..hi], after, &mut scratch);
                 }
-                let addressed: Vec<(usize, usize, usize)> =
-                    pieces.iter().map(|&(lo, hi)| (lo, hi, now.as_ptr() as usize + lo)).collect();
+                let addressed = pieces.iter().map(|&(lo, hi)| (lo, hi, now.as_ptr() as usize + lo));
                 let mut notes = crate::land::Notes::default();
                 // SAFETY: the fetched bytes are `now`'s.
-                unsafe { many.land_card(&addressed, after, &mut notes) };
+                unsafe { many.land_card(addressed, after, &mut notes) };
                 notes.flush();
                 assert!(bytes(a) == bytes(b), "title memory, round {round}");
                 assert!(bytes(one.data as usize) == bytes(many.data as usize), "the CPU's side, round {round}");
@@ -5046,7 +5076,7 @@ mod land_tests {
                     let mut notes = crate::land::Notes::default();
                     let (lo, hi) = (b * PIECE, (b + 1) * PIECE);
                     // SAFETY: the fetched bytes are `now`'s; each block once.
-                    unsafe { shadow.land_card(&[(lo, hi, at + lo)], 8, &mut notes) };
+                    unsafe { shadow.land_card(std::iter::once((lo, hi, at + lo)), 8, &mut notes) };
                     notes.flush();
                 });
                 for i in (3..LEN / 4).step_by(4 * 53) {

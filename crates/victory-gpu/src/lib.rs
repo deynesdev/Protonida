@@ -45,6 +45,8 @@ pub mod preload;
 #[cfg(all(windows, feature = "diagnostics"))]
 mod book;
 #[cfg(windows)]
+mod gpudetile;
+#[cfg(windows)]
 mod host;
 #[cfg(windows)]
 mod indirect;
