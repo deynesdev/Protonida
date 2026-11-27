@@ -48,6 +48,9 @@ deciding factor (later bad runs of the old binary also reached 12–15 fps).
 
 ## Ruled out (one change each, opening scene)
 
+- Write-to-read ordering between the title's commands: `VICTORY_BARRIER_ALL=1` (a
+  diagnostic switch: a full UAV barrier before every draw, dispatch and indirect execution)
+  leaves the faces missing (3.3-3.9 fps, 260 s run). [obs]
 - Stale decoration-bake sources: the cloud branch's bake-source refresh (8f95922) runs
   (1,585 sources over 128 bakes, 25 % refreshed, 0 failed) and faces stay missing. [obs]
 - Wave32 lowering of the four culling shaders: the "wave-wide branches" form in their place

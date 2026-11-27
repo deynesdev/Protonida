@@ -124,6 +124,24 @@ impl std::ops::Deref for Rec {
     }
 }
 
+impl Rec {
+    /// Diagnostics (`VICTORY_BARRIER_ALL=1`, off by default): called right
+    /// before each of the title's draws, dispatches and indirect executions
+    /// is recorded, so that none of them reads what an earlier one has not
+    /// finished writing. Slow; for telling a missing write-to-read ordering
+    /// from other faults.
+    pub(crate) fn barrier_all(&self) {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if !*ON.get_or_init(|| std::env::var_os("VICTORY_BARRIER_ALL").is_some_and(|v| v == "1")) {
+            return;
+        }
+        let all = D3D12_RESOURCE_BARRIER { Type: D3D12_RESOURCE_BARRIER_TYPE_UAV, ..Default::default() };
+        // SAFETY: called while the list records a command, so it is open; a
+        // UAV barrier on no resource names none.
+        unsafe { self.barriers(&[all]) };
+    }
+}
+
 /// For the frame-rate line.
 pub(crate) fn line(frames: f64) {
     let [asked, made] = [0, 1].map(|i| STATS[i].swap(0, Relaxed) as f64 / frames);
