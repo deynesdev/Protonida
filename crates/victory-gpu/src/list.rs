@@ -177,6 +177,30 @@ pub(crate) fn tables_done(lists: &[This]) {
     }
 }
 
+/// Work of ours at a place in a title list (DLSS in place of the title's
+/// FidelityFX upscaling, `crate::streamline`): it is given the host list
+/// there and says whether it recorded into it; if it did, what the title set
+/// is set again before the title's next draw or dispatch. From
+/// trustno1-coder/VIctory-NVIDIA 29d8dbf7d (GPL-3.0-or-later).
+#[cfg(windows)]
+pub(crate) type External = Box<dyn FnOnce(&crate::host::HostList) -> bool + Send>;
+
+/// Runs `work` at this place of title list `this`, now. False if the list
+/// records nowhere, or if its calls are translated later (`VICTORY_THIN=1`:
+/// not supported yet; the title's own work runs).
+#[cfg(windows)]
+pub(crate) fn external(this: This, work: External) -> bool {
+    if this.is_null() || thin::on() || host_list(this).is_none() {
+        return false;
+    }
+    with_state(this, |host, state| {
+        if work(host) {
+            state.replay(host);
+        }
+    });
+    true
+}
+
 /// The host list behind a title list, if there is a host GPU.
 #[cfg(windows)]
 pub(crate) fn host_list<'a>(this: This) -> Option<&'a crate::host::HostList> {

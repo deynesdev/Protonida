@@ -165,6 +165,18 @@ enum Command {
     Replay(replay::Replay),
     /// Show the resolved configuration and check it.
     Config,
+    /// Check NVIDIA DLSS on this PC without the title: Streamline loads from
+    /// `VICTORY_STREAMLINE_DIR` and says whether this GPU supports DLSS;
+    /// with `--device`, DLSS also runs three times on stand-in textures.
+    #[cfg(windows)]
+    UpscalerCheck {
+        /// The output size, `<width>x<height>`.
+        #[arg(long, default_value = "1920x1080")]
+        output: String,
+        /// Make the host device and run DLSS on it.
+        #[arg(long)]
+        device: bool,
+    },
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -243,6 +255,17 @@ fn main() -> Result<()> {
         #[cfg(all(windows, feature = "diagnostics"))]
         Command::Replay(options) => replay::run(options),
         Command::Config => show_config(),
+        #[cfg(windows)]
+        Command::UpscalerCheck { output, device } => {
+            let size = output
+                .split_once(['x', 'X'])
+                .and_then(|(w, h)| Some([w.trim().parse().ok()?, h.trim().parse().ok()?]))
+                .ok_or_else(|| anyhow::anyhow!("--output {output}: not <width>x<height>"))?;
+            for line in victory_hle::streamline::check(size, device) {
+                println!("{line}");
+            }
+            Ok(())
+        }
     }
 }
 

@@ -162,6 +162,19 @@ pub fn run(
         show(name, dll.bind_imports(&with_dlls, policy)?);
     }
     let exe_name = exe.file_name().unwrap_or_default().to_string_lossy();
+    // DLSS (`VICTORY_DLSS=1`): Streamline is loaded before the host device
+    // is made, and the title's FidelityFX imports go through ours.
+    #[cfg(windows)]
+    if execute {
+        match victory_hle::streamline::Asked::from_env() {
+            Ok(asked) => {
+                victory_hle::streamline::init(&asked);
+            }
+            Err(why) => println!("DLSS: {why}; DLSS stays off"),
+        }
+    }
+    #[cfg(windows)]
+    let with_dlls = victory_hle::modules::fidelityfx::Interpose { inner: &with_dlls };
     show(&exe_name, image.bind_imports(&with_dlls, policy)?);
     if execute {
         let size = image.info().size_of_image as usize;
