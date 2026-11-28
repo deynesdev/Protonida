@@ -369,6 +369,8 @@ extern "system" fn unknown_pipeline<const SLOT: usize>(
         // SAFETY: the title's out pointer (a local of its own).
         unsafe { *out = std::ptr::null() };
     }
+    #[cfg(all(windows, feature = "diagnostics"))]
+    dump_unknown_pipeline(SLOT, calls, desc as usize);
     if calls <= 4 || calls.is_power_of_two() {
         // Sixteen 64-bit words at `at`, read through the kernel: neither
         // pointer is known to be mapped.
@@ -397,6 +399,52 @@ extern "system" fn unknown_pipeline<const SLOT: usize>(
         );
     }
     E_NOTIMPL
+}
+
+/// Diagnostics (`VICTORY_DUMP_UNKNOWN_PIPELINES=<folder>`, off by default):
+/// each of the first 4,096 calls of a slot writes `<slot>-<call>.txt`, the
+/// description's first 32 words, and `<slot>-<call>-w<i>.bin`, the bytes
+/// word `i` points at: as many as word `i + 1` says when that is a size
+/// (1 to 64 KiB), else 512. For telling which shaders these pipelines hold.
+#[cfg(all(windows, feature = "diagnostics"))]
+fn dump_unknown_pipeline(slot: usize, call: u32, desc: usize) {
+    static DIR: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
+    let Some(dir) = DIR.get_or_init(|| {
+        let dir = std::path::PathBuf::from(std::env::var_os("VICTORY_DUMP_UNKNOWN_PIPELINES")?);
+        std::fs::create_dir_all(&dir).ok()?;
+        Some(dir)
+    }) else {
+        return;
+    };
+    if call > 4096 || desc == 0 {
+        return;
+    }
+    let mut bytes = [0u8; 256];
+    if !crate::host::read_into(desc as *const u8, &mut bytes) {
+        return;
+    }
+    let words: Vec<u64> = bytes
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .map(|c| u64::from_le_bytes(*c))
+        .collect();
+    let name = format!("{slot:x}-{call:04}");
+    let text: String = words.iter().map(|w| format!("{w:x}\n")).collect();
+    let _ = std::fs::write(dir.join(format!("{name}.txt")), text);
+    for (i, &w) in words.iter().enumerate() {
+        if !(0x1_0000..=0x7fff_ffff_ffff).contains(&w) {
+            continue;
+        }
+        let len = match words.get(i + 1) {
+            Some(&n) if (1..=0x1_0000).contains(&n) => n as usize,
+            _ => 512,
+        };
+        let mut piece = vec![0u8; len];
+        if crate::host::read_into(w as *const u8, &mut piece) {
+            let _ = std::fs::write(dir.join(format!("{name}-w{i:02}.bin")), piece);
+        }
+    }
 }
 
 /// The host device's state: the console's device is removed when the host's is
