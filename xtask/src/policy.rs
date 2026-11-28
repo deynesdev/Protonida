@@ -16,6 +16,7 @@ const MAX_ENCODED_RUN: usize = 512;
 
 const ALLOWED_EXTENSIONS: &[&str] = &[
     "rs", "toml", "md", "txt", "lock", "yml", "yaml", "json", "hlsl", "hlsli", "ps1", "cmd", "sh",
+    "py",
 ];
 const ALLOWED_NAMES: &[&str] = &[
     ".gitignore",
@@ -236,6 +237,7 @@ mod tests {
         assert!(check("crates/x/src/lib.rs", b"fn main() {}\n").is_empty());
         assert!(check(".gitignore", b"/target/\n").is_empty());
         assert!(check(".githooks/pre-commit", b"#!/bin/sh\n").is_empty());
+        assert!(check("scripts/launcher.py", b"#!/usr/bin/env python3\nprint('hi')\n").is_empty());
     }
 
     #[test]
