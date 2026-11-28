@@ -182,10 +182,58 @@ pub(crate) fn ready(p: &Arc<Pending>) -> Option<&HostPipeline> {
         super::library::note_used(&p.key);
     }
     if p.made.get().is_none() {
-        start(p, REQUESTED);
-        wait(p, crate::frame::current());
+        if must(p) {
+            // Made here, however long it takes: never dropped.
+            now(p);
+        } else {
+            start(p, REQUESTED);
+            wait(p, crate::frame::current());
+        }
     }
     p.made.get()?.as_ref()
+}
+
+/// The character head's blend-shape mapping
+/// (`ped_standard_head_cs:CS_ComputeBlendshapeMappings`). The title
+/// dispatches it once per head; dropped while its pipeline was being made
+/// (hundreds of dispatches a frame are, as the opening cutscene starts),
+/// the head is never built: the close-ups showed eyes, teeth and hair and
+/// no head in most runs. Made at first use, the heads were whole in three
+/// runs of three (2026-11-28). The idea: Vice-Tay #372, a wait of up to
+/// 2 s for this pipeline.
+const MUST_DEFAULT: &str = "61e54e90adccaf6a";
+
+/// The shaders whose pipelines are never dropped: `VICTORY_PIPELINE_MUST`
+/// (hashes as the log prints them, comma-separated; `0` for none), else
+/// [`MUST_DEFAULT`].
+fn must_list(var: Option<&str>) -> Vec<String> {
+    match var {
+        Some("0") => Vec::new(),
+        Some(v) => super::parse_skip_hashes(v),
+        None => super::parse_skip_hashes(MUST_DEFAULT),
+    }
+}
+
+/// Whether `p` uses a shader of [`must_list`]: such a pipeline is made at
+/// its first use instead of waiting within the frame's budget, so that a
+/// dispatch the title records once is never dropped.
+fn must(p: &Pending) -> bool {
+    static MUST: OnceLock<Vec<String>> = OnceLock::new();
+    let must = MUST.get_or_init(|| must_list(std::env::var("VICTORY_PIPELINE_MUST").ok().as_deref()));
+    !must.is_empty() && p.shaders.iter().any(|s| must.contains(&s.hash))
+}
+
+#[cfg(test)]
+mod must_tests {
+    use super::must_list;
+
+    /// The head's blend-shape mapping is never dropped unless asked.
+    #[test]
+    fn the_head_mapping_is_made_at_first_use_by_default() {
+        assert_eq!(must_list(None), ["61e54e90adccaf6a"]);
+        assert!(must_list(Some("0")).is_empty());
+        assert_eq!(must_list(Some("AAAABBBBCCCCDDDD, 0123456789abcdef")), ["aaaabbbbccccdddd", "0123456789abcdef"]);
+    }
 }
 
 /// Makes `p` on this thread if it is not made yet (waiting for a worker
