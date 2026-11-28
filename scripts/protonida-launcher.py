@@ -23,6 +23,8 @@ DEFAULT_VICTORY_EXE = REPO_ROOT / "target" / "x86_64-pc-windows-gnullvm" / "rele
 DEFAULT_WINESERVER = Path.home() / ".local" / "share" / "xcl-linux" / "wineserver-runtime" / "server" / "wineserver"
 DEFAULT_WINEPREFIX = Path.home() / ".local" / "share" / "xcl-linux" / "prefix"
 DEFAULT_XCL_LINUX_HOME = Path.home() / ".local" / "share" / "xcl-linux"
+# Where NVIDIA's Streamline SDK files are expected (not part of this repository).
+DEFAULT_STREAMLINE_DIR = DEFAULT_XCL_LINUX_HOME / "nvidia-sdk" / "streamline-v2.14.16" / "bin" / "x64"
 DEFAULT_SKIP_PIPELINES = "7115e46a79c78f98,59b1ba494f18c894,b8ca32a6899b87fb,659fe9cae59dbd88"
 
 LOG_LEVELS = [
@@ -71,6 +73,8 @@ def default_config() -> dict:
         # of the opening scene stays sharp while turning, at the same frame
         # rate (4.3 fps both, RTX 4050, 2026-11-28).
         "render_scale": "1.0",
+        "dlss": False,
+        "streamline_dir": str(DEFAULT_STREAMLINE_DIR),
         "port_constants": True,
         "port_descriptors": True,
         "port_guard": True,
@@ -228,6 +232,15 @@ class ProtonidaWindow(Gtk.ApplicationWindow):
         self._add_row(main_grid, row, "Overlay", self.mangohud_check)
         row += 1
 
+        # DLSS
+        self.dlss_check = Gtk.CheckButton(label="NVIDIA DLSS (1080p output from 720p, replaces the game's upscaler)")
+        self.dlss_check.set_tooltip_text(
+            "Needs NVIDIA's Streamline files (Advanced: Streamline folder) and dxvk-nvapi + NGX in the Wine prefix. "
+            "Output is fixed at 1920x1080; the Resolution and Render scale settings are not used with it."
+        )
+        self._add_row(main_grid, row, "Upscaler", self.dlss_check)
+        row += 1
+
         # Log level
         self.log_combo = Gtk.DropDown.new_from_strings([label for _, label in LOG_LEVELS])
         self._add_row(main_grid, row, "Log Level", self.log_combo)
@@ -299,6 +312,7 @@ class ProtonidaWindow(Gtk.ApplicationWindow):
             ("pipeline_workers", "PIPELINE_WORKERS", "2"),
             ("pipeline_wait_ms", "PIPELINE_WAIT_MS", "0"),
             ("render_scale", "Render scale (1.0 = output size; empty = the game's 2/3)", "1.0"),
+            ("streamline_dir", "Streamline folder (sl.interposer.dll, for DLSS)", str(DEFAULT_STREAMLINE_DIR)),
             ("ambient_shgi", "AMBIENT (when RTX Off)", "1.0"),
             ("ambient_air", "VICTORY_AMBIENT_AIR", "1.5"),
             ("skip_pipelines", "VICTORY_SKIP_PIPELINES", DEFAULT_SKIP_PIPELINES),
@@ -394,6 +408,7 @@ class ProtonidaWindow(Gtk.ApplicationWindow):
         self.log_combo.set_selected(log_ids.index(cfg["log_level"]) if cfg.get("log_level") in log_ids else 0)
 
         self.mangohud_check.set_active(bool(cfg.get("mangohud", False)))
+        self.dlss_check.set_active(bool(cfg.get("dlss", False)))
         self.port1_chk.set_active(bool(cfg.get("port_constants", True)))
         self.port2_chk.set_active(bool(cfg.get("port_descriptors", True)))
         self.port6_chk.set_active(bool(cfg.get("port_guard", True)))
@@ -419,6 +434,7 @@ class ProtonidaWindow(Gtk.ApplicationWindow):
             "rtx_mode": RTX_MODES[self.rtx_combo.get_selected()][0],
             "log_level": LOG_LEVELS[self.log_combo.get_selected()][0],
             "mangohud": self.mangohud_check.get_active(),
+            "dlss": self.dlss_check.get_active(),
             "port_constants": self.port1_chk.get_active(),
             "port_descriptors": self.port2_chk.get_active(),
             "port_guard": self.port6_chk.get_active(),
@@ -532,11 +548,22 @@ class ProtonidaWindow(Gtk.ApplicationWindow):
 
         game_dir = str(Path(game_exe).parent)
         env["VICTORY_GAME_DIR"] = linux_to_wine_path(game_dir)
-        env["VICTORY_OUTPUT"] = self.cfg["resolution"]
-        env["VICTORY_UPSCALER"] = self.cfg["upscaler"]
-        render_scale = str(self.cfg.get("render_scale", "")).strip()
-        if render_scale:
-            env["VICTORY_RENDER_SCALE"] = render_scale
+        if self.cfg.get("dlss"):
+            # The game's FidelityFX path (renderer 7) at its shipping sizes,
+            # 1280x720 in and 1920x1080 out, with DLSS taking the upscale.
+            env["VICTORY_OUTPUT"] = "1920x1080"
+            env["VICTORY_UPSCALER"] = "7"
+            env.pop("VICTORY_RENDER_SCALE", None)
+            env["VICTORY_DLSS"] = "1"
+            env["VICTORY_STREAMLINE_DIR"] = linux_to_wine_path(self.cfg.get("streamline_dir") or str(DEFAULT_STREAMLINE_DIR))
+            env["DXVK_ENABLE_NVAPI"] = "1"
+            env["WINEDLLOVERRIDES"] = "d3d12,d3d12core,d3d11,dxgi,d3dcompiler_47,nvapi64=n;mscoree,mshtml="
+        else:
+            env["VICTORY_OUTPUT"] = self.cfg["resolution"]
+            env["VICTORY_UPSCALER"] = self.cfg["upscaler"]
+            render_scale = str(self.cfg.get("render_scale", "")).strip()
+            if render_scale:
+                env["VICTORY_RENDER_SCALE"] = render_scale
         env["VICTORY_PORT_CONSTANTS"] = "1" if self.cfg["port_constants"] else "0"
         env["VICTORY_PORT_DESCRIPTORS"] = "1" if self.cfg["port_descriptors"] else "0"
         env["VICTORY_PORT_DESCRIPTORS_EVERY"] = self.cfg["port_descriptors_every"]
