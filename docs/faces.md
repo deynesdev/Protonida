@@ -58,6 +58,10 @@ deciding factor (later bad runs of the old binary also reached 12–15 fps).
   those destinations a host copy, so the copy runs on the card, left the heads missing in the
   depth target, and the driver ran out of memory (`NV_ERR_NO_MEMORY`) about 2 min in, in both
   runs; the change was not kept. 2026-11-28. [obs]
+- Buffer state tracking, upstream VIctory #334 (PastiiJay `8b76aec38` / realhenners
+  `af2aecf6c`; it fixed meshlet-cull dispatches that lost character geometry on AMD): ported
+  on branch `faces-334` (`28589067d`) behind `VICTORY_BUFFER_STATES=1`. With it on the heads
+  stay missing in the depth target (215 s, 5.4-5.5 fps). Not merged. 2026-11-28. [obs]
 - The `cap_good` capture in `~/.cache/protonida-exp` also shows the heads missing in its depth
   targets: it was not taken during the one good run, so it is no reference. [obs]
 - Stale decoration-bake sources: the cloud branch's bake-source refresh (8f95922) runs
@@ -83,9 +87,6 @@ deciding factor (later bad runs of the old binary also reached 12–15 fps).
 - flamingo `39bb53a11` (run 236): every mesh that comes out wrong reads a geometry buffer
   whose GPU copy does not hold decoded vertex streams, while title memory holds an encoded
   container (`42 40 00 00 26 …`); correct meshes have the decoded streams on the card. [src]
-- PastiiJay `8b76aec38` / realhenners `af2aecf6c` (upstream VIctory #334): per-list state
-  tracking of host copies between shader writes and reads; fixed meshlet-cull dispatches
-  that lost character geometry on AMD. Not in this tree. [src]
 - cool_fox README: "`VICTORY_THIN=1` … NVIDIA: head skin may not draw" (THIN=0 alone did
   not help here). [src]
 - The game has a GPU morphable head model, `ped_morphable_model_cs` (`CS_MorphableInit`
