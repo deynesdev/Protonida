@@ -101,7 +101,16 @@ pub fn run(paths: Vec<PathBuf>, verbose: bool, disasm: bool) -> Result<()> {
                         let mut list = Vec::new();
                         for n in &programs {
                             *t.native_stages.entry(n.stage).or_default() += 1;
-                            list.push(format!("{:?} {} B", n.stage, n.code.len()));
+                            // The code's hash, to match code a title hands
+                            // over without its container.
+                            let code = blake3::hash(&n.code).to_hex();
+                            let head: String = n.code.iter().take(32).map(|b| format!("{b:02x}")).collect();
+                            list.push(format!(
+                                "{:?} {} B code#{} head#{head}",
+                                n.stage,
+                                n.code.len(),
+                                &code[..16]
+                            ));
                             if disasm {
                                 listing.push(format!("    {:?} stage I/O: {:?}", n.stage, n.io));
                                 listing.extend(n.layout.iter().map(|p| format!("    {p:?}")));
