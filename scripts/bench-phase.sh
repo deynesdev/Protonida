@@ -9,20 +9,17 @@ shift 2
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 XCL_HOME="${XCL_LINUX_HOME:-$HOME/.local/share/xcl-linux}"
-VICTORY_EXE="$REPO_ROOT/target/x86_64-pc-windows-gnullvm/release/victory.exe"
-# The game executable is never hard-coded: take GAME_EXE (a Linux path), or else
-# the launcher's saved "game_exe" from ~/.config/protonida/launcher.json.
+VICTORY_EXE="${BENCH_EXE:-$REPO_ROOT/target/x86_64-pc-windows-gnullvm/release/victory.exe}"
+# The game's executable as a Wine path (Z:\...): from GAME_EXE, or else the one picked in the
+# launcher (its saved config). Never hardcoded here (docs/asset-policy.md).
 if [[ -z "${GAME_EXE:-}" ]]; then
-  GAME_EXE="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("game_exe",""))' \
-    "${XDG_CONFIG_HOME:-$HOME/.config}/protonida/launcher.json" 2>/dev/null || true)"
+  LAUNCHER_CFG="${XDG_CONFIG_HOME:-$HOME/.config}/protonida/launcher.json"
+  GAME_EXE="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("game_exe", ""))' "$LAUNCHER_CFG" 2>/dev/null || true)"
+  if [[ -n "$GAME_EXE" && "$GAME_EXE" != [A-Za-z]:\\* ]]; then
+    GAME_EXE="Z:${GAME_EXE//\//\\}"
+  fi
 fi
-if [[ -z "$GAME_EXE" || ! -f "$GAME_EXE" ]]; then
-  echo "bench-phase.sh: set GAME_EXE=/path/to/game_scarlett_master.exe (or pick it once in the launcher)" >&2
-  exit 2
-fi
-GAME_DIR="$(dirname "$GAME_EXE")"
-GAME_EXE_WINE="Z:${GAME_EXE//\//\\}"
-GAME_DIR_WINE="Z:${GAME_DIR//\//\\}"
+GAME_EXE="${GAME_EXE:?set GAME_EXE to the game executable (a Wine path such as Z:\\games\\title\\game.exe), or pick it once in scripts/protonida-launcher.py}"
 OUT_DIR="/tmp/protonida-bench/${PROFILE}"
 mkdir -p "$OUT_DIR"
 
@@ -50,7 +47,7 @@ export VICTORY_LOG=info
 export RUST_LOG=info
 export DXVK_FILTER_DEVICE_NAME=NVIDIA
 export VKD3D_FILTER_DEVICE_NAME=NVIDIA
-export VICTORY_GAME_DIR="$GAME_DIR_WINE"
+export VICTORY_GAME_DIR="${VICTORY_GAME_DIR:-${GAME_EXE%\\*}}"
 export VICTORY_OUTPUT=1280x720
 export VICTORY_UPSCALER=6
 export VICTORY_PORT_CONSTANTS=1
@@ -115,7 +112,7 @@ NVSMI_PID=$!
 trap 'kill "$NVSMI_PID" 2>/dev/null || true' EXIT
 
 echo "=== Running profile=$PROFILE duration=${DURATION}s ==="
-timeout "${DURATION}s" /usr/bin/wine "$VICTORY_EXE" run --console series-s --execute "$GAME_EXE_WINE" </dev/null > "$LOG_FILE" 2>&1 || true
+timeout "${DURATION}s" /usr/bin/wine "$VICTORY_EXE" run --console series-s --execute "$GAME_EXE" </dev/null > "$LOG_FILE" 2>&1 || true
 
 kill "$NVSMI_PID" 2>/dev/null || true
 wait "$NVSMI_PID" 2>/dev/null || true
