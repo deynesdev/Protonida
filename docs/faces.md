@@ -51,6 +51,15 @@ deciding factor (later bad runs of the old binary also reached 12–15 fps).
 - Write-to-read ordering between the title's commands: `VICTORY_BARRIER_ALL=1` (a
   diagnostic switch: a full UAV barrier before every draw, dispatch and indirect execution)
   leaves the faces missing (3.3-3.9 fps, 260 s run). [obs]
+- Title buffer copies done on the CPU out of bytes a shader wrote (flamingo's "the card copy
+  is the one to keep"): a copy into memory with no host copy is done at submission, in title
+  memory, even where a shader wrote the source on the card (`host/place.rs`; the diagnostics
+  build logs each one). This happens over 2,048 times in 150 s of the opening scene. Giving
+  those destinations a host copy, so the copy runs on the card, left the heads missing in the
+  depth target, and the driver ran out of memory (`NV_ERR_NO_MEMORY`) about 2 min in, in both
+  runs; the change was not kept. 2026-11-28. [obs]
+- The `cap_good` capture in `~/.cache/protonida-exp` also shows the heads missing in its depth
+  targets: it was not taken during the one good run, so it is no reference. [obs]
 - Stale decoration-bake sources: the cloud branch's bake-source refresh (8f95922) runs
   (1,585 sources over 128 bakes, 25 % refreshed, 0 failed) and faces stay missing. [obs]
 - Wave32 lowering of the four culling shaders: the "wave-wide branches" form in their place

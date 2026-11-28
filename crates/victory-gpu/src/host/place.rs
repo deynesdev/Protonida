@@ -240,6 +240,25 @@ impl HostList {
             return false;
         };
         let Some(to) = crate::shadow::peek(dst as u64, len as u64).filter(|s| !s.in_place()) else {
+            // (Giving such a destination a host copy, so that the copy is
+            // done on the card, was tried 2026-11-28: the heads stayed
+            // missing and the driver ran out of memory at about 2 min in
+            // both runs; docs/faces.md.)
+            #[cfg(feature = "diagnostics")]
+            if shaders_own(src, len).is_some() {
+                use std::sync::atomic::AtomicU32;
+                static SEEN: AtomicU32 = AtomicU32::new(0);
+                let n = SEEN.fetch_add(1, Ordering::Relaxed) + 1;
+                if n <= 32 || n.is_power_of_two() {
+                    tracing::info!(
+                        n,
+                        dst = format_args!("{dst:#x}"),
+                        src = format_args!("{src:#x}"),
+                        len,
+                        "a copy out of bytes shaders wrote, into memory without a host copy: done on the CPU from title memory"
+                    );
+                }
+            }
             return false;
         };
         let own = shaders_own(src, len);
