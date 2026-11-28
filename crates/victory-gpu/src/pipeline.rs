@@ -100,6 +100,68 @@ const RT_SKIP_PATTERNS: &[&[u8]] = &[
     b"PPR_Raytrace",
 ];
 
+/// The shaders that keep the ray-tracing copy of the scene's geometry up
+/// to date (`bvh_skinning` and `bvh_skinning_smh`: characters, cables,
+/// ropes, trees and hair skinned again for the BVH, and its index and
+/// vertex unpacking), by container hash (the game's 1.0.2.1 containers;
+/// their entry names are not in their bytes). Only the BVH builder reads
+/// what they write, so with hardware ray tracing off they are skipped like
+/// the passes above. In the opening scene's cell they took 58 ms of the
+/// card's 200 ms a frame; skipped, 4.3 fps became 5.5 with nothing amiss in
+/// the picture (2026-11-28, RTX 4050).
+#[cfg(windows)]
+const RT_GEOMETRY_HASHES: &[&str] = &[
+    "023439f44041b689",
+    "1a77e876755eff12",
+    "207bf7d2f14a87e6",
+    "2cb480030989538a",
+    "3cf39f4495b908d0",
+    "409e2cddc90b6d0d",
+    "4518151afe8c6c09",
+    "48426bae580a080c",
+    "60b09004fef7f2f1",
+    "64fe9fa3cb71d57f",
+    "6b39336022e5e663",
+    "71ab19b0a4669299",
+    "72f552f4553fb5f9",
+    "75bd00da58a1615c",
+    "77edaab306206e9a",
+    "81dc252c4d183e30",
+    "822e62ded676ef45",
+    "827b309e779552d7",
+    "82a2ad6d07417d36",
+    "878933b499cfa14d",
+    "8f9eb68d0c6dd5cf",
+    "904e7a51e3fab26c",
+    "90a0692af4320129",
+    "952fd529dd779b27",
+    "96d1ef386a0ddcfb",
+    "9db486cee396e315",
+    "9ffcaff533995118",
+    "a567b9ef845fb680",
+    "aff8936db59182b7",
+    "b5a672a450b321e2",
+    "b8e420aac4197681",
+    "c7213dc64c67638b",
+    "c7aef9c89f12051f",
+    "c968414adaaeb93d",
+    "ca2c77616107b128",
+    "cb90a66c7fe122aa",
+    "cd34b8dd52ee5c0c",
+    "ced45910ad577dcb",
+    "d28b4922384831fe",
+    "d3022ba8427bc72c",
+    "dd24ff46af3ae6ee",
+    "e06a21f3cea46973",
+    "f16876929fa64f9f",
+];
+
+/// Whether `hash` is one of [`RT_GEOMETRY_HASHES`].
+#[cfg(windows)]
+fn rt_geometry(hash: &str) -> bool {
+    RT_GEOMETRY_HASHES.contains(&hash)
+}
+
 #[cfg(windows)]
 fn skip_rt_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
@@ -170,7 +232,7 @@ fn shader(stage: &'static str, bytes: &[u8]) -> Arc<Shader> {
                 #[cfg(windows)]
                 probe: crate::lightprobe::on().then(|| crate::lightprobe::role(bytes)).flatten(),
                 #[cfg(windows)]
-                skip_rt: skip_rt_enabled() && matches_rt_skip(bytes),
+                skip_rt: skip_rt_enabled() && (matches_rt_skip(bytes) || rt_geometry(&full.to_hex()[..16])),
                 #[cfg(windows)]
                 translated: OnceLock::new(),
             })
@@ -849,6 +911,17 @@ pub fn save_pipeline_cache() {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(windows)]
+    #[test]
+    fn the_ray_tracing_geometry_passes_are_listed() {
+        // Two of the 43, from the cell's GPU timing (the costliest).
+        assert!(super::rt_geometry("4518151afe8c6c09"));
+        assert!(super::rt_geometry("3cf39f4495b908d0"));
+        // The character skinning the picture needs is not among them.
+        assert!(!super::rt_geometry("512416d975ace48b"));
+        assert_eq!(super::RT_GEOMETRY_HASHES.len(), 43);
+    }
+
     #[cfg(all(windows, feature = "diagnostics"))]
     #[test]
     fn skip_hashes_accepts_full_hashes_only() {
