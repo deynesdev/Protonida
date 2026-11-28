@@ -1,9 +1,34 @@
 # Missing faces and skin
 
-Status 2026-11-28: **not fixed.** In most runs the close-up characters of the game's opening
-scene show eyes, teeth and hair, but no head mesh; distant characters have complete heads. In
-about one run in six the same build draws the faces correctly. Every claim below is marked
-**[obs]** (seen in a run, log or capture), **[src]** (source or commit) or **[inf]** (inference).
+Status 2026-11-28: **fixed** (commit `c9bfaa7ee`, tag `faces-working-2026-11-28`). Before it,
+in most runs the close-up characters of the game's opening scene showed eyes, teeth and hair,
+but no head mesh; distant characters had complete heads. About one run in six drew the faces.
+Every claim below is marked **[obs]** (seen in a run, log or capture), **[src]** (source or
+commit) or **[inf]** (inference).
+
+## The cause and the fix
+
+- The head is built by `ped_standard_head_cs`. Its blend-shape mapping,
+  `CS_ComputeBlendshapeMappings` (`61e54e90adccaf6a`), is dispatched once per head, at the first
+  frame the character is set up (frame ~1,540-1,650 of the opening scene). [obs]
+- A dispatch whose host pipeline is not made within the frame's wait budget
+  (`pipeline/make.rs` `ready`) is dropped. In that window the log reads "dropped 285.3/frame
+  without a host pipeline: being made", and the mapping is not in any later frame. [obs]
+- The mapping was among the dropped dispatches, so the head was never built. When its
+  pipeline happened to be ready in time (for example, loaded from the pipeline library a
+  previous run saved), the faces were there: the race. [inf, from the fix below]
+- Fix: a pipeline using a shader that `VICTORY_PIPELINE_MUST` names (default: this hash) is
+  made on the spot at first use and never dropped. With it, the heads were whole (profile,
+  nose, chin, neck) in the depth target in 3 runs of 3, and in colour in a release build;
+  before it, 0 of 6 runs that day. The idea comes from Vice-Tay #372 (via ruff-lab
+  `f9e00b4b2`), a 2 s wait for this pipeline. [obs]
+- Other passes the title runs only once could have the same problem; `VICTORY_PIPELINE_MUST`
+  takes a list. A full pipeline prebake (`victory warm`) avoids it for every pipeline. [inf]
+- Found by comparing other forks: ruff-lab's newest commit names a "head blend-shape wait";
+  the capture's op lists showed every other `ped_standard_head_cs` pass running and this one
+  absent.
+
+## What follows is the investigation before the fix
 
 ## How to check a build
 

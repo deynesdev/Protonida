@@ -29,7 +29,7 @@
 
 **Measured 2026-11-27** (`scripts/bench-phase.sh` defaults, the game's opening scene in the prison, 215 s runs): **4.5–5.0 FPS**, frame time p50 ≈ 200 ms, p95 260–290 ms, p99 260–320 ms. Frames are CPU-bound in `preparing` and `copying back`.
 
-**Character faces and skin do not render** in most runs: the close-up characters show eyes, teeth and hair, but the head mesh itself is missing (distant characters are fine). It is a race: one run in about six draws the faces. What is known and ruled out is in [docs/faces.md](docs/faces.md).
+**Character faces render again** (fixed 2026-11-28). The close-up heads of the opening scene used to be missing in most runs (eyes, teeth and hair with no head). The cause was the head's one-time blend-shape mapping (`ped_standard_head_cs:CS_ComputeBlendshapeMappings`) being dropped when its pipeline was not built in time. That pipeline is now built at first use and never dropped (`VICTORY_PIPELINE_MUST`, below); heads were whole in 3 runs of 3. The investigation is in [docs/faces.md](docs/faces.md).
 
 ### Earlier numbers (not reproduced)
 
@@ -55,7 +55,7 @@ The table below was written by earlier work on this tree. It has **not been repr
 - **Input & Audio:** GameInput keyboard and XInput controller input work (including scripted `VICTORY_KEYS` in release builds). Audio runs through Wine's standard audio backend.
 - **Wine `wineserver` note:** Benchmarks above use a locally patched RB-tree view-indexed + `/dev/ntsync` `wineserver` to cut `VirtualProtect`/`GetWriteWatch` IPC overhead. On unpatched stock Wine Staging, heavy-city CPU `copies` time is higher (~3–5 ms/frame slower depending on kernel/Wine version).
 - **Known issues & visual trade-offs:**
-  - **Faces and skin of close-up characters are missing in most runs** (head mesh not drawn; race, about one run in six is correct). See [docs/faces.md](docs/faces.md).
+  - Many other draws and dispatches are still dropped while their pipelines are being built (hundreds a frame as a scene starts); they come back once the pipelines are made. A second run of the same scene loads them from the pipeline library. A one-time pass with that problem shows up wrong for the whole scene, as the faces did; `VICTORY_PIPELINE_MUST=<hash,...>` makes the named shaders' pipelines at first use.
   - Heavy 2,500–2,800+ draw city scenes remain CPU `preparing`-bound on Linux/Wine (`copies` ~11–16 ms/frame from `VirtualProtect`/`GetWriteWatch` IPCs + per-draw CBV copies).
   - NVIDIA's 1,000,000-descriptor shader-visible heap cap prevents Renderer Port #5 (`VICTORY_PORT_CBV=1`) table `raw_twins`, so table CBVs are still copied into dynamic slots per draw.
   - `rtDynamicShadows="false"` + `ssroSampleCount="1"` in `settings.xml` trade dynamic ray-traced shadows for higher FPS while keeping full hardware RTGI and RT reflections.
@@ -89,6 +89,7 @@ The table below was written by earlier work on this tree. It has **not been repr
 - **Optional RT pass skipping (`VICTORY_SKIP_RT=1`)**: Skips 15 unused ray-tracing compute passes and their VRAM allocations when running in non-RT mode.
 
 ### Series S Graphics & Shader Correctness
+- **Character heads drawn in every run (`VICTORY_PIPELINE_MUST`, default `61e54e90adccaf6a`)**: The head's blend-shape mapping is dispatched once per character; a dispatch whose pipeline was still being built was dropped, so in most runs the close-up heads never got built (eyes, teeth and hair floated over the collar). That pipeline is now built at first use and never dropped; heads were whole in 3 runs of 3 on the RTX 4050 (2026-11-28). The idea is from Vice-Tay #372. `VICTORY_PIPELINE_MUST=0` turns it off; a comma-separated hash list replaces the default. See [docs/faces.md](docs/faces.md).
 - **On-demand mip streaming (`VICTORY_LEVELS_ON_DEMAND=1`, `VICTORY_TEXTURE_BUDGET_MB=1280`, `VICTORY_TEXTURE_NO_WAIT=0`)**: Prevents saturating a 512 MB up-front mip budget and avoids skipping unfilled remapped pages, increasing streamed textures `4.5x` (`417 MB → 1,877 MB` / `9,414` textures in the opening sequence, restoring crisp character uniform and environment textures).
 - **GPU compute texture detiling (`VICTORY_GPU_DETILE=1`, `fxceless 3461f52f`), `TilingCache` readback reuse (`TaynanGT f0019f2e`), and zero-alloc `relay_merge` (`fxceless` PR `#1427`)**: Opt-in GPU compute detiling offloads texture detiling completely (`0.00 ms` CPU detile, `0` refused dispatches on RTX 4050 + `vkd3d-proton 3.2.0`) while preserving the `StagingPiece` pool when off (`default = 0`).
 - **Full 16-bit `half_views` translator & cache stack (`LoverCatys 4b5856a1`, `shader_cache::FORMAT = 3`)**: Adds `emit/halves.rs`, `HostShader::half_views`, `descriptor::host::half_view`/`half_inexact`, and `TablePlan::half` alongside `ForceEarlyDepthStencil` (`VICTORY_EARLY_DEPTH`), raw 16-bit integer `d16` image loads (`VICTORY_D16_BITS`), `VICTORY_SPILL_STRICT` + `s_bfm_b32` literal folding, `v_fmac_f32` VOP3 bit-2 accumulator modifiers, and `wave.rs` unmatched `s_*saveexec` scanning.
@@ -179,6 +180,8 @@ Protonida stands on the shoulders of an incredible open-source community:
 - **[fxceless/victory-fork](https://github.com/fxceless/victory-fork)** — BC7 rotation fix, RDNA 2 `v_mad_legacy_f32`, SDWA sign extension, flight-room & diagnostics engineering
 - **[XaviFortes/VIctory-RDNA](https://github.com/XaviFortes/VIctory-RDNA)** — `BufferSweep` span caching & parallel texture readbacks
 - **[LoverCatys/ruff-lab](https://git.gtahub.st/github/LoverCatys--ruff-lab)** & **[Belobug/VIctory-Belobug-AMD](https://github.com/Belobug/VIctory-Belobug-AMD)** — `VICTORY_SKIP_RT`, `x86-64-v3` + thin LTO profile, and ambient lighting research
+- **[TaynanGT/Vice-Tay](https://git.gtahub.st/github/TaynanGT--Vice-Tay)** (#372, via LoverCatys/ruff-lab) — the idea that the head blend-shape pipeline must not be dropped
+- **[realblastex/flamingo](https://git.gtahub.st/github/realblastex--flamingo)** — the character-geometry investigation that narrowed down the missing heads
 - **[HansKristian-Work/vkd3d-proton](https://github.com/HansKristian-Work/vkd3d-proton)** — D3D12-on-Vulkan translation on Linux
 
 ---
