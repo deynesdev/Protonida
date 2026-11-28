@@ -1,6 +1,6 @@
 # Missing faces and skin
 
-Status 2026-11-27: **not fixed.** In most runs the close-up characters of the game's opening
+Status 2026-11-28: **not fixed.** In most runs the close-up characters of the game's opening
 scene show eyes, teeth and hair, but no head mesh; distant characters have complete heads. In
 about one run in six the same build draws the faces correctly. Every claim below is marked
 **[obs]** (seen in a run, log or capture), **[src]** (source or commit) or **[inf]** (inference).
@@ -81,13 +81,29 @@ deciding factor (later bad runs of the old binary also reached 12–15 fps).
   not help here). [src]
 - The game has a GPU morphable head model, `ped_morphable_model_cs` (`CS_MorphableInit`
   9cfa9aa6a5e60f26, `CS_MorphableShapeSolve` fe3678eae1ca9a1a, `CS_MorphableReconstructNormals`
-  7ae4af7c4309b836). In no run (the good one included) is any of the three translated or bound,
-  while every run logs 29 pipelines the title "goes without" because their creation method,
-  device slot `0x1c8` (the title's precompiled-pipeline cache), is not implemented. If the
-  morphable heads are among those pipelines, the high-detail head geometry is never built by
-  the GPU here; the good run would then be a fallback winning a race. Next: find which
-  pipelines the 29 `0x1c8` calls describe (`first_points_at`, `description` in the warning),
-  and whether the title retries them through a creation method this layer implements. [obs,inf]
+  7ae4af7c4309b836). In no run (the good one included) is any of the three translated or bound.
+  The title never asks for them through any creation method: they are not among the pipelines
+  of the unimplemented slots either (next item). [obs]
+
+## Refuted: the pipelines of device slots 0x1c8 and 0x218
+
+The 29 warnings are not 29 pipelines: the warning is logged at powers of two. 2026-11-28, a
+diagnostics run with `VICTORY_DUMP_UNKNOWN_PIPELINES=<dir>` (70 s, opening scene) recorded
+1,609 calls of `0x1c8` and 37 of `0x218`, all during start-up. [obs]
+
+- A `0x218` description is a compute pipeline made of the pieces an `FSPX` part holds: root
+  signature, registers (0x1c B), a hash (0x14 B), GFX10 code in GPU memory, program metadata
+  (0x403 ...). `0x1c8` is the graphics form: registers (0x184 B), 0xbc B, then two stages each
+  as code and metadata. [obs]
+- The code's first 16 bytes match exactly one program in `shaders.rpf` for every call
+  (`shader-info -v` now prints each program's `head#`); the rest differs, as the title patches
+  the code it uploads. [obs]
+- They are the engine's utility shaders: the 37 computes are `im:CS_Texture2D*Mipmap*` and
+  `im:CS_*Depth*Copy*`; the graphics ones are Scaleform UI (`FVertex*`, `FTexTG*` with
+  `VVertex*`/`VTexTG*`, about 1,550), Bink video, blits, depth downsamples, a QR code. **No ped,
+  head, skin, hair or morph shader is among them.** [obs]
+- So lead "the morphable heads are among the dropped pipelines" is refuted. The dropped
+  mipmap computes may matter for other textures; not followed here. [obs,inf]
 - flamingo's conclusion "the decoding is on the card and the card copy is the one to keep"
   [src]: a GPU-only result like that is lost if anything refreshes the GPU copy from title
   memory afterwards; worth testing with refreshes of those buffers suppressed. [inf]
