@@ -111,8 +111,6 @@ unsafe impl Send for Library {}
 unsafe impl Sync for Library {}
 
 /// The library's exported functions.
-// (`free_resources` and the [`Recorded`] fields are for the title's upscaler path, next.)
-#[allow(dead_code)]
 struct Sl {
     _library: Library,
     init: abi::SlInit,
@@ -482,7 +480,6 @@ pub const OUTPUT: usize = 6;
 pub(crate) type Textures = [Option<(ID3D12Resource, u32)>; 7];
 
 /// What [`record`] recorded.
-#[allow(dead_code)]
 pub(crate) struct Recorded {
     pub(crate) mode: u32,
     pub(crate) optimal: Option<[u32; 2]>,
@@ -577,8 +574,7 @@ pub(crate) fn record(
 
 /// What DLSS made for the upscaler goes (the title destroyed its upscaler).
 /// The caller has let submitted work finish.
-#[allow(dead_code)]
-pub(crate) fn free_resources() {
+fn free_resources() {
     let (Some(sl), true) = (SL.get(), DLSS_READY.load(Acquire)) else { return };
     let viewport = abi::ViewportHandle::new(VIEWPORT_DLSS);
     let mut calls = calls();
@@ -591,6 +587,192 @@ pub(crate) fn free_resources() {
 /// The next upscaling's id.
 pub(crate) fn next_id() -> u64 {
     NEXT_ID.fetch_add(1, Relaxed) + 1
+}
+
+/// One upscaling the title asked for: a FidelityFX `ffxDispatch` of an
+/// upscale, in its own terms (`victory_hle::modules::fidelityfx` reads it).
+#[derive(Clone, Copy, Debug)]
+pub struct Upscale {
+    /// The FidelityFX context.
+    pub context: usize,
+    /// The title's command list.
+    pub list: *const crate::object::Object,
+    /// Colour, depth, motion vectors, exposure, reactive mask, transparency
+    /// and composition mask, output: the title's resource (null if none) and
+    /// the FidelityFX state it is in.
+    pub resources: [(*const crate::object::Object, u32); 7],
+    pub camera: plan::Camera,
+    pub pre_exposure: f32,
+    pub frame_ms: f32,
+}
+
+// SAFETY: pointers to title objects that live until the list has run (the
+// title's part, as on the console); nothing else is shared.
+unsafe impl Send for Upscale {}
+
+/// What became of an upscaling.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Taken {
+    /// DLSS does it: the title's own must not run.
+    Dlss,
+    /// The title's own runs. Why, for the log.
+    No(&'static str),
+}
+
+// Since the last frame-rate line: upscalings done by DLSS, failed, left to
+// the title; and done in all.
+static EVALUATED: AtomicU64 = AtomicU64::new(0);
+static FAILED: AtomicU64 = AtomicU64::new(0);
+static FORWARDED: AtomicU64 = AtomicU64::new(0);
+static EVALUATED_ALL: AtomicU64 = AtomicU64::new(0);
+
+/// The upscaling `up` asked for on the title's thread: DLSS records it at
+/// this place of the title's list instead; the title's own runs otherwise.
+pub fn upscale(up: &Upscale) -> Taken {
+    if PLAN.get().is_none_or(|p| !p.dlss) {
+        return Taken::No("Streamline is not loaded or DLSS is not supported");
+    }
+    if !ready() {
+        return Taken::No("Streamline has no device yet, or DLSS did not start");
+    }
+    if [COLOUR, DEPTH, MOTION, OUTPUT].iter().any(|&i| up.resources[i].0.is_null()) {
+        return Taken::No("a required texture (colour, depth, motion vectors, output) is missing");
+    }
+    if up.camera.render.contains(&0) || up.camera.output.contains(&0) {
+        return Taken::No("an empty render or output size");
+    }
+    if let Err(why) = validate(up) {
+        return Taken::No(why);
+    }
+    let id = next_id();
+    let up = *up;
+    let asked = crate::list::external(up.list.cast_mut().cast(), Box::new(move |host| evaluate(host, &up, id)));
+    if !asked {
+        return Taken::No("the title's list records nowhere (no host list, or VICTORY_THIN=1)");
+    }
+    Taken::Dlss
+}
+
+/// The title's own upscaling ran instead.
+pub fn forwarded() {
+    FORWARDED.fetch_add(1, Relaxed);
+}
+
+/// What an upscaling's textures must be for DLSS, checked on the title's
+/// thread (the title's own runs if not): host textures, in states they can
+/// be in.
+fn validate(up: &Upscale) -> Result<(), &'static str> {
+    for (i, &(resource, state)) in up.resources.iter().enumerate() {
+        if resource.is_null() || i == 5 {
+            continue;
+        }
+        let resource = resource.cast_mut().cast();
+        if !crate::resource::is_resource(resource) {
+            return Err("a texture of the upscaling is no resource of ours");
+        }
+        let Some(copy) = crate::resource::host_copy(resource) else {
+            return Err("a texture of the upscaling has no host copy (a buffer?)");
+        };
+        let wanted = if i == OUTPUT { plan::output_state(state) } else { plan::input_state(state) };
+        if crate::host::legal_state(&copy.texture, wanted) != wanted {
+            return Err(if i == OUTPUT {
+                "the output cannot be written by a shader (no unordered access)"
+            } else {
+                "an input cannot be read by a shader"
+            });
+        }
+    }
+    Ok(())
+}
+
+/// DLSS in place of the title's upscaling, recorded into `host` (where the
+/// title's list is now). Whether it recorded anything.
+fn evaluate(host: &crate::host::HostList, up: &Upscale, id: u64) -> bool {
+    let Some(plan) = PLAN.get() else { return false };
+    let camera = up.camera;
+    let fail = |why: &str| {
+        FAILED.fetch_add(1, Relaxed);
+        tracing::warn!(id, "DLSS: the upscaling was not recorded: {why} (the output keeps what it had)");
+        false
+    };
+    // The inputs as a compute shader's would be (aliased views, uploads of
+    // title-written textures, depth twins), then in the states DLSS is told.
+    let used = |i: usize| {
+        !up.resources[i].0.is_null()
+            && (i != REACTIVE || plan.asked.reactive)
+            && (i != EXPOSURE || camera.flags & plan::FFX_AUTO_EXPOSURE == 0)
+    };
+    let mut textures: Textures = Default::default();
+    for i in [COLOUR, DEPTH, MOTION, EXPOSURE, REACTIVE, OUTPUT] {
+        if !used(i) {
+            continue;
+        }
+        let (resource, state) = up.resources[i];
+        let resource = resource.cast_mut().cast();
+        if i != OUTPUT && crate::external::prepare_input(host, resource).is_none() {
+            return fail("an input could not be prepared");
+        }
+        let wanted = if i == OUTPUT { plan::output_state(state) } else { plan::input_state(state) };
+        let Some((texture, legal)) = crate::external::host_texture(host, resource, wanted) else {
+            return fail("a texture has no host copy");
+        };
+        if legal != wanted {
+            return fail("a texture cannot be in the state DLSS needs");
+        }
+        textures[i] = Some((texture, legal));
+    }
+    let recorded = match record(host.list.as_raw(), &textures, &camera, up.pre_exposure, id) {
+        Ok(recorded) => recorded,
+        Err(why) => return fail(&why),
+    };
+    crate::external::output_written(up.resources[OUTPUT].0.cast_mut().cast());
+    EVALUATED.fetch_add(1, Relaxed);
+    let all = EVALUATED_ALL.fetch_add(1, Relaxed) + 1;
+    if all == 1 || recorded.changed {
+        tracing::info!(
+            render = ?camera.render,
+            output = ?camera.output,
+            mode = plan::sl_mode_name(recorded.mode),
+            asked = plan.asked.mode.name(),
+            preset = plan.asked.preset,
+            optimal = ?recorded.optimal,
+            hdr = camera.flags & plan::FFX_HIGH_DYNAMIC_RANGE != 0,
+            depth_inverted = camera.depth_inverted(),
+            auto_exposure = textures[EXPOSURE].is_none(),
+            reactive = textures[REACTIVE].is_some(),
+            jitter = ?recorded.jitter,
+            mvec_scale = ?recorded.mvec_scale,
+            evaluations = all,
+            "DLSS: upscaling recorded in place of the title's FidelityFX"
+        );
+    }
+    true
+}
+
+/// The title's FidelityFX upscaler `context` is destroyed: what DLSS made
+/// for it goes once submitted work has run.
+pub fn upscaler_destroyed(context: usize) {
+    let _ = context;
+    if !ready() {
+        return;
+    }
+    crate::external::finish_submitted();
+    free_resources();
+}
+
+/// For the frame-rate line.
+pub(crate) fn line(frames: f64) {
+    if PLAN.get().is_none_or(|p| !p.dlss) {
+        return;
+    }
+    let [done, failed, forwarded] = [&EVALUATED, &FAILED, &FORWARDED].map(|c| c.swap(0, Relaxed));
+    tracing::info!(
+        "DLSS per frame: {:.2} upscalings by DLSS, {:.2} failed, {:.2} left to the title's FidelityFX ({} by DLSS so far)",
+        done as f64 / frames,
+        failed as f64 / frames,
+        forwarded as f64 / frames,
+        EVALUATED_ALL.load(Relaxed)
+    );
 }
 
 /// `victory upscaler-check`: Streamline and DLSS on this PC, without the
