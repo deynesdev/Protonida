@@ -458,13 +458,35 @@ fn library() -> Option<&'static Library> {
         .as_ref()
 }
 
+/// The blob pointer `CreatePipelineLibrary` is given: null for no bytes, as
+/// the call documents for an empty library.
+fn blob_pointer(bytes: &[u8]) -> *const std::ffi::c_void {
+    if bytes.is_empty() { std::ptr::null() } else { bytes.as_ptr().cast() }
+}
+
 /// The library in `blob`, or an empty one if the host rejects the blob (an
 /// adapter or driver change, damage).
 fn open(device: &ID3D12Device1, blob: Blob) -> Option<Library> {
     let make = |bytes: &[u8]| -> windows::core::Result<ID3D12PipelineLibrary1> {
-        // SAFETY: the bytes outlive the library (kept beside it).
+        // Not the binding's `CreatePipelineLibrary(&[u8])`: for no bytes it
+        // passes the empty slice's pointer, which is not null, and
+        // vkd3d-proton refuses a blob of length 0 that is not null
+        // (E_INVALIDARG, `d3d12_pipeline_library_init`). No library was
+        // then ever made or saved, and every launch made every pipeline
+        // anew.
+        let mut out = std::ptr::null_mut();
+        // SAFETY: the device's own method with a blob of `bytes.len()`
+        // bytes (or none); the bytes outlive the library (kept beside it).
         unsafe {
-            device.CreatePipelineLibrary::<ID3D12PipelineLibrary>(bytes)?.cast()
+            (Interface::vtable(device).CreatePipelineLibrary)(
+                Interface::as_raw(device),
+                blob_pointer(bytes),
+                bytes.len(),
+                &ID3D12PipelineLibrary::IID,
+                &mut out,
+            )
+            .ok()?;
+            ID3D12PipelineLibrary::from_raw(out).cast()
         }
     };
     if !blob.bytes().is_empty() {
@@ -794,6 +816,15 @@ pub(crate) fn note_used(key: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// An empty library is asked for with a null blob: vkd3d-proton refuses
+    /// a non-null blob of length 0, and no library was ever made.
+    #[test]
+    fn an_empty_library_is_asked_for_with_a_null_blob() {
+        assert!(blob_pointer(&[]).is_null());
+        let bytes = [1u8, 2, 3];
+        assert_eq!(blob_pointer(&bytes), bytes.as_ptr().cast());
+    }
 
     #[test]
     fn names_change_with_what_goes_into_the_pipeline() {
