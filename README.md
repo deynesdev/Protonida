@@ -55,7 +55,7 @@ The table below was written by earlier work on this tree. It has **not been repr
 - **Input & Audio:** GameInput keyboard and XInput controller input work (including scripted `VICTORY_KEYS` in release builds). Audio runs through Wine's standard audio backend.
 - **Wine `wineserver` note:** Benchmarks above use a locally patched RB-tree view-indexed + `/dev/ntsync` `wineserver` to cut `VirtualProtect`/`GetWriteWatch` IPC overhead. On unpatched stock Wine Staging, heavy-city CPU `copies` time is higher (~3–5 ms/frame slower depending on kernel/Wine version).
 - **Known issues & visual trade-offs:**
-  - Many other draws and dispatches are still dropped while their pipelines are being built (hundreds a frame as a scene starts); they come back once the pipelines are made. A second run of the same scene loads them from the pipeline library. A one-time pass with that problem shows up wrong for the whole scene, as the faces did; `VICTORY_PIPELINE_MUST=<hash,...>` makes the named shaders' pipelines at first use.
+  - The first time a scene is played, draws and dispatches are dropped while their pipelines are being built (hundreds a frame as the scene starts); they come back once the pipelines are made. From the second launch on, the pipeline library loads them (fixed 2026-11-28, below). A one-time pass that is dropped shows up wrong for the whole scene, as the faces did; `VICTORY_PIPELINE_MUST=<hash,...>` makes the named shaders' pipelines at first use. `victory warm` (the launcher's Prebake) builds every known pipeline ahead of time; it takes about an hour for the game's 67,000 pipelines.
   - Heavy 2,500–2,800+ draw city scenes remain CPU `preparing`-bound on Linux/Wine (`copies` ~11–16 ms/frame from `VirtualProtect`/`GetWriteWatch` IPCs + per-draw CBV copies).
   - NVIDIA's 1,000,000-descriptor shader-visible heap cap prevents Renderer Port #5 (`VICTORY_PORT_CBV=1`) table `raw_twins`, so table CBVs are still copied into dynamic slots per draw.
   - `rtDynamicShadows="false"` + `ssroSampleCount="1"` in `settings.xml` trade dynamic ray-traced shadows for higher FPS while keeping full hardware RTGI and RT reflections.
@@ -89,6 +89,7 @@ The table below was written by earlier work on this tree. It has **not been repr
 - **Optional RT pass skipping (`VICTORY_SKIP_RT=1`)**: Skips 15 unused ray-tracing compute passes and their VRAM allocations when running in non-RT mode.
 
 ### Series S Graphics & Shader Correctness
+- **Pipelines kept between launches (pipeline library fix)**: No pipeline library was ever made on vkd3d-proton, so every launch built every pipeline again ("no host pipeline library: pipelines are not kept"). The empty library was asked for with a zero-length blob whose pointer was not null, which vkd3d-proton refuses (`E_INVALIDARG`); Windows' D3D12 accepts it. It is now asked for with a null blob; the library is saved while playing and loaded at the next launch, and the game starts noticeably faster from the second launch on (2026-11-28).
 - **Character heads drawn in every run (`VICTORY_PIPELINE_MUST`, default `61e54e90adccaf6a`)**: The head's blend-shape mapping is dispatched once per character; a dispatch whose pipeline was still being built was dropped, so in most runs the close-up heads never got built (eyes, teeth and hair floated over the collar). That pipeline is now built at first use and never dropped; heads were whole in 3 runs of 3 on the RTX 4050 (2026-11-28). The idea is from Vice-Tay #372. `VICTORY_PIPELINE_MUST=0` turns it off; a comma-separated hash list replaces the default. See [docs/faces.md](docs/faces.md).
 - **On-demand mip streaming (`VICTORY_LEVELS_ON_DEMAND=1`, `VICTORY_TEXTURE_BUDGET_MB=1280`, `VICTORY_TEXTURE_NO_WAIT=0`)**: Prevents saturating a 512 MB up-front mip budget and avoids skipping unfilled remapped pages, increasing streamed textures `4.5x` (`417 MB → 1,877 MB` / `9,414` textures in the opening sequence, restoring crisp character uniform and environment textures).
 - **GPU compute texture detiling (`VICTORY_GPU_DETILE=1`, `fxceless 3461f52f`), `TilingCache` readback reuse (`TaynanGT f0019f2e`), and zero-alloc `relay_merge` (`fxceless` PR `#1427`)**: Opt-in GPU compute detiling offloads texture detiling completely (`0.00 ms` CPU detile, `0` refused dispatches on RTX 4050 + `vkd3d-proton 3.2.0`) while preserving the `StagingPiece` pool when off (`default = 0`).
@@ -123,8 +124,10 @@ cargo build --release --target x86_64-pc-windows-gnullvm -p victory
 Run the built-in GTK4 launcher (requires system Python 3 + PyGObject/GTK4, preinstalled on Fedora/GNOME):
 
 ```bash
-./scripts/protonida-launcher.py
+/usr/bin/python3 ./scripts/protonida-launcher.py
 ```
+
+Run it with the system Python (`/usr/bin/python3`), which has the GTK 4 bindings; a Homebrew or other `python3` first on `PATH` fails with `No module named 'gi'`. Set **Advanced → victory.exe Path** to your build. **Stop** ends the whole game process group (SIGKILL after 5 s if needed), and the launcher notices when the game exits on its own.
 
 Provides main controls for **Resolution** (720p / 1080p / 1440p / 4K), **Console Profile** (Series S Lockhart vs Series X Anaconda), **Ray Tracing (RTX)** (auto-syncing `VICTORY_BVH_BUILDER` and `settings.xml`), **MangoHud**, a RAM-guarded **Prebake Shaders** button (`victory shaders` → `victory warm` with `VICTORY_PREBAKE_BIG_MAX=2` + `/proc/meminfo` watchdog), and a collapsible **Advanced** drawer for all `VICTORY_*`, Wine, VRAM, guard, experimental UFFD WP, and skip-pipeline settings (saved to `~/.config/protonida/launcher.json`).
 
