@@ -66,6 +66,11 @@ def default_config() -> dict:
         "gpu_filter": "NVIDIA",
         "cache_dir": "",
         "upscaler": "6",
+        # The title's own upscaler renders at 2/3 of the output (853x480
+        # for 1280x720) and smears when the camera moves; at 1.0 the cell
+        # of the opening scene stays sharp while turning, at the same frame
+        # rate (4.3 fps both, RTX 4050, 2026-11-28).
+        "render_scale": "1.0",
         "port_constants": True,
         "port_descriptors": True,
         "port_guard": True,
@@ -293,6 +298,7 @@ class ProtonidaWindow(Gtk.ApplicationWindow):
             ("inplace_mb", "VICTORY_INPLACE_MB", "4096"),
             ("pipeline_workers", "PIPELINE_WORKERS", "2"),
             ("pipeline_wait_ms", "PIPELINE_WAIT_MS", "0"),
+            ("render_scale", "Render scale (1.0 = output size; empty = the game's 2/3)", "1.0"),
             ("ambient_shgi", "AMBIENT (when RTX Off)", "1.0"),
             ("ambient_air", "VICTORY_AMBIENT_AIR", "1.5"),
             ("skip_pipelines", "VICTORY_SKIP_PIPELINES", DEFAULT_SKIP_PIPELINES),
@@ -528,6 +534,9 @@ class ProtonidaWindow(Gtk.ApplicationWindow):
         env["VICTORY_GAME_DIR"] = linux_to_wine_path(game_dir)
         env["VICTORY_OUTPUT"] = self.cfg["resolution"]
         env["VICTORY_UPSCALER"] = self.cfg["upscaler"]
+        render_scale = str(self.cfg.get("render_scale", "")).strip()
+        if render_scale:
+            env["VICTORY_RENDER_SCALE"] = render_scale
         env["VICTORY_PORT_CONSTANTS"] = "1" if self.cfg["port_constants"] else "0"
         env["VICTORY_PORT_DESCRIPTORS"] = "1" if self.cfg["port_descriptors"] else "0"
         env["VICTORY_PORT_DESCRIPTORS_EVERY"] = self.cfg["port_descriptors_every"]
