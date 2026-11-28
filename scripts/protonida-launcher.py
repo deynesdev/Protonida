@@ -625,20 +625,12 @@ class ProtonidaWindow(Gtk.ApplicationWindow):
 
         def runner() -> None:
             try:
-                self.proc = subprocess.Popen(
+                self.proc = start_and_watch(
                     cmd,
-                    cwd=str(REPO_ROOT),
-                    env=env,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    errors="replace",
+                    env,
+                    on_line=lambda line: GLib.idle_add(self._append_log, line),
+                    on_exit=lambda code: GLib.idle_add(self._on_finished, code),
                 )
-                assert self.proc.stdout is not None
-                for line in self.proc.stdout:
-                    GLib.idle_add(self._append_log, line)
-                code = self.proc.wait()
-                GLib.idle_add(self._on_finished, code)
             except Exception as exc:
                 GLib.idle_add(self._append_log, f"\nLauncher error: {exc}\n")
                 GLib.idle_add(self._on_finished, -1)
@@ -758,20 +750,16 @@ class ProtonidaWindow(Gtk.ApplicationWindow):
             try:
                 for label, cmd in steps:
                     GLib.idle_add(self._append_log, f"\n--- {label} ---\n$ {shlex.join(cmd)}\n")
-                    self.proc = subprocess.Popen(
+                    exited = threading.Event()
+                    codes: list[int] = []
+                    self.proc = start_and_watch(
                         cmd,
-                        cwd=str(REPO_ROOT),
-                        env=env,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.STDOUT,
-                        text=True,
-                        errors="replace",
-                        start_new_session=True,
+                        env,
+                        on_line=lambda line: GLib.idle_add(self._append_log, line),
+                        on_exit=lambda code: (codes.append(code), exited.set()),
                     )
-                    assert self.proc.stdout is not None
-                    for line in self.proc.stdout:
-                        GLib.idle_add(self._append_log, line)
-                    last_code = self.proc.wait()
+                    exited.wait()
+                    last_code = codes[0]
                     if last_code != 0:
                         break
                 GLib.idle_add(self._on_finished, last_code)
@@ -785,12 +773,7 @@ class ProtonidaWindow(Gtk.ApplicationWindow):
 
     def _on_stop(self, _btn: Gtk.Button) -> None:
         if self.proc is not None and self.proc.poll() is None:
-            import signal
-            try:
-                os.killpg(os.getpgid(self.proc.pid), signal.SIGCONT)
-            except Exception:
-                pass
-            self.proc.terminate()
+            stop_group(self.proc)
             self.status_label.set_text("Stopping…")
 
     def _on_finished(self, code: int) -> bool:
@@ -800,6 +783,65 @@ class ProtonidaWindow(Gtk.ApplicationWindow):
         self.stop_btn.set_sensitive(False)
         self.status_label.set_text(f"Exited with code {code}.")
         return False
+
+
+def start_and_watch(cmd, env, on_line, on_exit) -> subprocess.Popen:
+    """Starts `cmd` in a process group of its own; `on_line` gets its output,
+    `on_exit` its exit code as soon as it ends. Waits on the process, not on
+    its output: wineserver and Wine's helper services inherit the pipe and
+    outlive the game, so the pipe never closed and the launcher never saw
+    the game end."""
+    proc = subprocess.Popen(
+        cmd,
+        cwd=str(REPO_ROOT),
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        errors="replace",
+        start_new_session=True,
+    )
+
+    def read() -> None:
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            on_line(line)
+
+    def wait() -> None:
+        on_exit(proc.wait())
+
+    threading.Thread(target=read, daemon=True).start()
+    threading.Thread(target=wait, daemon=True).start()
+    return proc
+
+
+def stop_group(proc: subprocess.Popen, grace: float = 5.0) -> None:
+    """Ends `proc`'s whole process group: SIGTERM (after SIGCONT, in case the
+    RAM watchdog paused it), then SIGKILL if anything is left after `grace`
+    seconds. A SIGTERM to the wine process alone left the game running."""
+    import signal
+
+    try:
+        pgid = os.getpgid(proc.pid)
+    except ProcessLookupError:
+        return
+    for sig in (signal.SIGCONT, signal.SIGTERM):
+        try:
+            os.killpg(pgid, sig)
+        except ProcessLookupError:
+            return
+
+    def kill_later() -> None:
+        try:
+            proc.wait(timeout=grace)
+        except subprocess.TimeoutExpired:
+            pass
+        try:
+            os.killpg(pgid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+    threading.Thread(target=kill_later, daemon=True).start()
 
 
 class ProtonidaApp(Gtk.Application):
